@@ -11,45 +11,73 @@ encoded frame (RTCEncoded{Video,Audio}Frame)
         │
         │  WritableStream provided by RTCRtpScriptTransform or createEncodedStreams
         ▼
-   ┌──────────────────────────────────────────────┐
-   │  worker-frame.encodeFrame                    │
-   │    1. ratchet lookup: key for current epoch  │
-   │    2. allocate sender-wide monotonic CTR     │
-   │    3. sframeEncrypt(plaintext, key, ctr)     │
-   │       a. serializeHeader(kid, ctr)           │
-   │       b. iv = salt XOR be96(ctr)             │
-   │       c. AES-GCM encrypt; AAD = header bytes │
-   │    4. replace frame.data with [hdr][ct+tag]  │
-   └──────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────┐
+   │  worker-frame.encodeFrame                            │
+   │    1. ratchet lookup: key for current epoch          │
+   │    2. allocate sender-wide monotonic CTR             │
+   │    3. codec-aware prefix split:                      │
+   │         N = getUnencryptedBytes(state.codec, kind)   │
+   │         prefix  = plaintext[0..N]  (clear)          │
+   │         body    = plaintext[N..]   (encrypted)      │
+   │    4. sframeEncrypt(body, key, ctr)                  │
+   │         a. serializeHeader(kid, ctr)                 │
+   │         b. iv = salt XOR be96(ctr)                   │
+   │         c. AES-GCM encrypt body; AAD = header bytes  │
+   │    5. replace frame.data with:                       │
+   │         [prefix (N bytes)][hdr][ct+tag]              │
+   └──────────────────────────────────────────────────────┘
         │
         ▼
    ReadableStream — back to RTCRtpSender
 ```
 
+Wire format on the network (codec-aware mode, N > 0):
+
+```
+┌─────────────────────┬────────────────┬──────────────────────────┐
+│  unencrypted prefix │  SFrame header │  AES-GCM ciphertext+tag  │
+│     (N bytes)       │  (variable)    │  (body length + 16 tag)  │
+└─────────────────────┴────────────────┴──────────────────────────┘
+ ↑                     ↑
+ SFU reads here         SFrame parser starts here (receiver peels N first)
+ for routing/kind
+```
+
+When no codec is configured (default), N = 0 and the format collapses to the standard SFrame layout `[hdr][ct+tag]` — unchanged from prior behaviour.
+
 The decode (receive) path:
 
 ```
-ciphertext frame from RTCRtpReceiver
+wire frame from RTCRtpReceiver
         │
         ▼
-   ┌──────────────────────────────────────────────┐
-   │  worker-frame.decodeFrame                    │
-   │    1. parseHeader → kid, ctr, bodyOffset     │
-   │    2. splitKid(kid) → epoch, peerIndex       │
-   │    3. stale-epoch gate:                      │
-   │         if epoch < currentMinValidEpoch      │
-   │         emit decrypt_failure{stale_epoch};   │
-   │         drop frame                           │
-   │    4. resolveKey({ kid, epoch, peerIndex })  │
-   │         null → emit key_not_found; drop      │
-   │    5. iv = salt XOR be96(ctr)                │
-   │    6. AES-GCM decrypt; AAD = header bytes    │
-   │    7. replace frame.data with plaintext      │
-   └──────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────┐
+   │  worker-frame.decodeFrame                            │
+   │    1. codec-aware prefix peel:                       │
+   │         N = getUnencryptedBytes(state.codec, kind)   │
+   │         prefix = wire[0..N]                          │
+   │         buf    = wire[N..]  (SFrame header+ct+tag)  │
+   │    2. parseHeader(buf) → kid, ctr, bodyOffset        │
+   │    3. splitKid(kid) → epoch, peerIndex               │
+   │    4. stale-epoch gate:                              │
+   │         if epoch < currentMinValidEpoch              │
+   │         emit decrypt_failure{stale_epoch}; drop      │
+   │    5. resolveKey({ kid, epoch, peerIndex })          │
+   │         null → emit key_not_found; drop              │
+   │    6. iv = salt XOR be96(ctr)                        │
+   │    7. AES-GCM decrypt buf; AAD = header bytes        │
+   │    8. reassemble: [prefix][plaintext]                │
+   │    9. replace frame.data with reassembled bytes      │
+   └──────────────────────────────────────────────────────┘
         │
         ▼
    downstream decoder
 ```
+
+**Receiver side-channel constraint:** both sides must agree on `codec` out-of-band
+(e.g. via signalling or `StreamsMsg.codec`). This is the same constraint LiveKit
+accepts in their `FrameCryptor` implementation. There is no in-band negotiation
+in this library.
 
 Three queueing subtleties live inside the worker state machine:
 
@@ -113,5 +141,6 @@ The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-G
 | `worker.ts` | Worker entry point. Wires `onrtctransform` and the `postMessage` fallback to the state machine. |
 | `worker-state.ts` | Per-worker state: current epoch, key table, pre-epoch queue, message dispatch. |
 | `worker-frame.ts` | Encoded-frame I/O: `encodeFrame`, `decodeFrame`, the read/write stream pipe, drain loop. |
-| `worker-types.ts` | Worker `postMessage` contract: `InMsg`, `OutMsg`, `PerSenderKeyBundle`, `Side`. |
+| `worker-types.ts` | Worker `postMessage` contract: `InMsg`, `OutMsg`, `PerSenderKeyBundle`, `Side`, `Codec`, `FrameKind`. |
+| `codec-partial.ts` | `getUnencryptedBytes(codec, frameKind) → number`: codec-to-prefix-byte-count table for partial encryption. |
 | `internal/buffer.ts` | `toArrayBuffer` helper to keep WebCrypto happy across SAB-backed and plain `Uint8Array` inputs. |

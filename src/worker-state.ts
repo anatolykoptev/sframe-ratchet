@@ -29,6 +29,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		preEpochQueue: [],
 		draining: false,
 		emit,
+		codec: undefined,
 	};
 }
 
@@ -51,6 +52,7 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			await drainPreEpochQueue(state);
 			return;
 		case 'streams':
+			if (msg.codec !== undefined) state.codec = msg.codec;
 			pipe(state, msg.side, msg.readable, msg.writable);
 			return;
 		case 'teardown':

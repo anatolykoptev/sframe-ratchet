@@ -9,6 +9,16 @@ import type { PeerIndex, SFrameKey } from './types.ts';
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
 
+/** Codecs for which the partial-encryption prefix table is defined. */
+export type Codec = 'vp8' | 'vp9' | 'h264' | 'av1' | 'opus';
+
+/**
+ * Frame kind for VP8: 'key' = keyframe, 'inter' = interframe.
+ * Only meaningful for VP8; other codecs ignore this field.
+ * Derived from RTCEncodedVideoFrame.type in the stream transform.
+ */
+export type FrameKind = 'key' | 'inter';
+
 export interface PerSenderKeyBundle { cryptoKey: CryptoKey; salt: Uint8Array }
 
 export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex }
@@ -31,6 +41,8 @@ export interface StreamsMsg {
 	type: 'streams'; side: Side;
 	readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
 	writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+	/** Optional per-track codec; drives codec-aware partial encryption prefix. */
+	codec?: Codec;
 }
 export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | StreamsMsg;
 
@@ -68,6 +80,8 @@ export interface WorkerState {
 	/** Re-entrancy guard for drainPreEpochQueue — true while a drain is active. */
 	draining: boolean;
 	emit: (msg: OutMsg) => void;
+	/** Per-track codec; drives codec-aware partial encryption.  Undefined = full encrypt. */
+	codec?: Codec;
 }
 
 export const GRACE_WINDOW_MS = 2000;

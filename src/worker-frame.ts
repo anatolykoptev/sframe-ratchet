@@ -12,8 +12,9 @@
 import { parseHeader } from './sframe-header.ts';
 import { sframeDecrypt, sframeEncrypt } from './sframe.ts';
 import { splitKid } from './ratchet-ids.ts';
-import { PRE_EPOCH_QUEUE_CAP, type Side, type WorkerState } from './worker-types.ts';
+import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
+import { getUnencryptedBytes } from './codec-partial.ts';
 
 export function pipe(
 	state: WorkerState,
@@ -26,8 +27,14 @@ export function pipe(
 		RTCEncodedVideoFrame | RTCEncodedAudioFrame
 	>({
 		async transform(frame, controller) {
+			// Derive VP8 frame kind from the native encoded-frame metadata.
+			// RTCEncodedVideoFrame.type is 'key' | 'delta'; audio frames have no
+			// such property. Map to our FrameKind ('key' | 'inter').
+			const rawType = (frame as RTCEncodedVideoFrame).type;
+			const frameKind: FrameKind | undefined =
+				rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
 			try {
-				if (side === 'encode') await encodeFrame(state, frame);
+				if (side === 'encode') await encodeFrame(state, frame, frameKind);
 				else await decodeFrame(state, frame);
 				controller.enqueue(frame);
 			} catch (err) {
@@ -63,6 +70,7 @@ export function pipe(
 export async function encodeFrame(
 	state: WorkerState,
 	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+	frameKind?: FrameKind,
 ): Promise<void> {
 	const entry = state.epochs.get(state.currentEpoch);
 	if (!entry) throw new Error('worker: no active send epoch');
@@ -76,17 +84,40 @@ export async function encodeFrame(
 	state.ctr = ctr + 1n;
 
 	const plaintext = new Uint8Array(frame.data);
-	const sealed = await sframeEncrypt(plaintext, key, ctr);
-	frame.data = toExclusiveArrayBuffer(sealed);
-	// TODO(#group-calls-vp8): leave VP8 payload-descriptor bytes unencrypted
-	// so the SFU can route keyframes. VP8 path lands alongside codec work.
+
+	// Codec-aware partial encryption: N leading bytes stay in the clear so the
+	// SFU can route by frame type and decoders fail gracefully on key mismatch.
+	// When codec is unset (undefined), N=0 — identical to the current full-encrypt
+	// path. NOTE: the unencrypted prefix is NOT in AES-GCM AAD; see SECURITY.md.
+	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), plaintext.byteLength);
+	const prefix = plaintext.subarray(0, N);  // untouched
+	const body = plaintext.subarray(N);       // encrypted
+
+	const sealed = await sframeEncrypt(body, key, ctr);
+
+	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag]
+	const wire = new Uint8Array(N + sealed.byteLength);
+	wire.set(prefix, 0);
+	wire.set(sealed, N);
+	frame.data = toExclusiveArrayBuffer(wire);
 }
 
 export async function decodeFrame(
 	state: WorkerState,
 	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
 ): Promise<void> {
-	const buf = new Uint8Array(frame.data);
+	const raw = new Uint8Array(frame.data);
+
+	// Codec-aware prefix peel: receiver must know the codec (set via StreamsMsg)
+	// to determine N. Both sides must agree. N=0 when codec is unset (default).
+	// Clamp to frame length to handle truncated/corrupt frames safely.
+	const rawType = (frame as RTCEncodedVideoFrame).type;
+	const frameKind: FrameKind | undefined =
+		rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
+	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), raw.byteLength);
+	const prefix = raw.subarray(0, N);   // unencrypted prefix (not authenticated)
+	const buf = raw.subarray(N);         // [SFrame header][ciphertext+tag]
+
 	let hdrKid = -1;
 	let hdrEpoch = -1;
 	let hdrPeerIndex = -1;
@@ -123,7 +154,12 @@ export async function decodeFrame(
 			const entry = state.epochs.get(e);
 			return entry?.keys.get(pi) ?? null;
 		});
-		frame.data = toExclusiveArrayBuffer(opened);
+
+		// Reassemble: [unencrypted prefix] [decrypted plaintext]
+		const plaintext = new Uint8Array(N + opened.byteLength);
+		plaintext.set(prefix, 0);
+		plaintext.set(opened, N);
+		frame.data = toExclusiveArrayBuffer(plaintext);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		if (msg !== 'stale_epoch') {
@@ -188,8 +224,16 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 		// are re-enqueued and the function returns — it does NOT re-loop.
 		const pending = state.preEpochQueue.splice(0);
 		for (const { frame } of pending) {
-			const buf = new Uint8Array(frame.data);
+			const raw = new Uint8Array(frame.data);
 			try {
+				// Codec-aware prefix peel — mirrors decodeFrame logic.
+				const rawType = (frame as RTCEncodedVideoFrame).type;
+				const frameKind: FrameKind | undefined =
+					rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
+				const N = Math.min(getUnencryptedBytes(state.codec, frameKind), raw.byteLength);
+				const prefix = raw.subarray(0, N);
+				const buf = raw.subarray(N);
+
 				const hdr = parseHeader(buf);
 				const { epoch, peerIndex } = splitKid(hdr.kid);
 				if (epoch < state.currentMinValidEpoch) {
@@ -209,7 +253,12 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
 				});
-				frame.data = toExclusiveArrayBuffer(opened);
+
+				// Reassemble: [unencrypted prefix] [decrypted plaintext]
+				const plaintext = new Uint8Array(N + opened.byteLength);
+				plaintext.set(prefix, 0);
+				plaintext.set(opened, N);
+				frame.data = toExclusiveArrayBuffer(plaintext);
 			} catch (err) {
 				// Decrypt error on retry — emit observability event (CLAUDE.md: no silent errors).
 				const detail = err instanceof Error ? err.message : String(err);

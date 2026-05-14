@@ -60,3 +60,7 @@ export {
 // ---- Frame cryptor (main-thread glue) ------------------------------------
 export { FrameCryptor, supportsSFrame } from './frame-cryptor.js';
 export type { FrameCryptorOptions, EpochParams } from './frame-cryptor.js';
+
+// ---- Codec-aware partial encryption --------------------------------------
+export { getUnencryptedBytes } from './codec-partial.js';
+export type { Codec, FrameKind } from './worker-types.js';
