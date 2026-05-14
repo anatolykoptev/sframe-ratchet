@@ -7,19 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### BREAKING
-
-- **Default cipher suite corrected to RFC 9605 suite 4 (`AES_128_GCM_SHA256`).** The 0.1.0 code path derived 32-byte AEAD keys using SHA-256 HKDF, which matched no defined RFC 9605 suite. The corrected default (suite 4) derives **16-byte AES-128-GCM** keys using SHA-256 HKDF. Frames encrypted with 0.1.0 **cannot be decrypted** with 0.2.0 code. Known internal consumers (e.g. oxpulse-chat) must re-key or pin to 0.1.0 until they upgrade.
+## [0.2.0] — 2026-05-14
 
 ### Added
 
-- **Suite 5 (`AES_256_GCM_SHA512`):** AES-256-GCM AEAD with HKDF-SHA-512 and 64-byte ChainKey. Select per room via `suite: 'AES_256_GCM_SHA512'` on `RoomRatchet`, `FrameCryptor`, and `SimpleKex`.
-- `CipherSuite` type, `DEFAULT_CIPHER_SUITE` constant, `suiteParams()` helper exported from the public barrel.
-- `suite` field on `RoomRatchetOptions`, `FrameCryptorOptions`, `SimpleKexConfig`, and `WorkerState`.
-- `SimpleKex` now uses PBKDF2-SHA-512 and HKDF-SHA-512 when `suite: 'AES_256_GCM_SHA512'` is set.
-- New test file `src/__tests__/cipher-suite-5.test.ts` (19 tests): suite 5 round-trip, SimpleKex integration, suite isolation, and a locked deterministic regression vector.
-- `docs/ARCHITECTURE.md` — "Cipher suites" section with RFC §4.5 table and FIPS/HIPAA framing.
-- `docs/SECURITY.md` — "FIPS / HIPAA conformance" section with primitive table, conformance note, and migration guidance.
+- AES-256-GCM-SHA512 cipher suite (RFC 9605 suite 5) — FIPS / HIPAA aligned. Select via `suite: 'AES_256_GCM_SHA512'` on `RoomRatchet`, `FrameCryptor`, and `SimpleKex`. `CipherSuite` type, `DEFAULT_CIPHER_SUITE` constant, and `suiteParams()` helper exported from the public barrel.
+- Codec-aware partial encryption (vp8 key/inter, vp9, h264, av1, opus) — preserves SFU-visible RTP headers and codec syntax while encrypting payload. Configurable per codec via `codecMode` option.
+- SIF trailer for mixed E2EE / non-E2EE rooms — optional, off by default. Enables graceful coexistence of encrypted and plaintext senders in the same session.
+- Ratchet retry window on decode — smooths over key-rotation desync when a receiver's epoch lags behind the sender. Default window: 8 steps. Configurable via `retryWindow` option.
+- Typed error hierarchy — `SFrameError` base with subclasses: `KeyNotFoundError`, `StaleEpochError`, `AEADAuthError`, `RatchetWindowExhaustedError`, `HeaderParseError`, `QueueFullError`. All thrown errors are instanceof-checkable.
+- Telemetry hook — `onMetrics(worker, handler)` registers a per-worker callback receiving `encrypt`, `decrypt`, `fail`, `retry`, `drop`, and `epoch` event counters.
+- Reference KEX adapter `SimpleKex` — shared-password starter using PBKDF2 + HKDF, intended for demos and development. **NOT for production.**
+- RFC 9605 §C test vectors — 47 locked compliance tests covering all defined cipher suites and header formats.
+- Examples folder — Node.js round-trip example, browser mesh topology, and SFU integration guide with partial-encryption configuration.
+
+### Changed
+
+- **BREAKING**: Suite 4 now matches RFC 9605 §4.5 exactly (AES-128-GCM + HKDF-SHA-256, 16-byte keys). The 0.1.0 implementation derived 32-byte AES-256 keys with a SHA-256 KDF — matching no defined RFC suite. Frames encrypted with 0.1.0 will **not** decrypt with 0.2.0. Pin to 0.1.0 if you have ciphertext to migrate.
+
+### Test coverage
+
+- 38 → 198 tests across cipher suites, codec partial encryption, SIF trailer, ratchet window, typed errors, telemetry, SimpleKex, and RFC 9605 §C vectors.
 
 ## [0.1.0] - 2026-05-13
 
@@ -34,5 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - KID packing helpers (`makeKid`, `joinKid`, `splitKid`, `buildPeerIndexMap`, `validatePeerIndexMap`)
 - 38-test suite covering AEAD, ratchet epoch lifecycle, worker frame queue, and transit-only mode
 
-[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anatolykoptev/sframe-ratchet/releases/tag/v0.1.0
