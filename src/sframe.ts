@@ -10,6 +10,7 @@ import type { SFrameKey, SFrameKeyResolver } from './types.ts';
 import { parseHeader, serializeHeader } from './sframe-header.ts';
 import { splitKid } from './ratchet-ids.ts';
 import { toArrayBuffer as asArrayBuffer } from './internal/buffer.js';
+import { AEADAuthError, KeyNotFoundError } from './errors.ts';
 
 // Re-export for consumers who want the header API via this module.
 export { parseHeader, serializeHeader } from './sframe-header.ts';
@@ -65,27 +66,36 @@ export async function sframeDecrypt(
 ): Promise<Uint8Array> {
 	const hdr = parseHeader(sframe);
 	if (sframe.length < hdr.bodyOffset + AEAD_TAG_BYTES) {
-		throw new Error('sframe: frame too short for tag');
+		throw new AEADAuthError('sframe: frame too short for tag', { kid: hdr.kid, ctr: hdr.ctr });
 	}
 	const { epoch, peerIndex } = splitKid(hdr.kid);
 	const key = resolveKey({ kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr });
-	if (!key) throw new Error(`sframe: key not found for kid=${hdr.kid}`);
+	if (!key) {
+		throw new KeyNotFoundError(`sframe: key not found for kid=${hdr.kid}`, { kid: hdr.kid, epoch, peerIndex });
+	}
 
 	const header = sframe.subarray(0, hdr.bodyOffset);
 	const body = sframe.subarray(hdr.bodyOffset);
 	const iv = deriveIv(key.salt, hdr.ctr);
 
-	const pt = await crypto.subtle.decrypt(
-		{
-			name: 'AES-GCM',
-			iv: asArrayBuffer(iv),
-			additionalData: asArrayBuffer(header),
-			tagLength: AEAD_TAG_BYTES * 8,
-		},
-		key.cryptoKey,
-		asArrayBuffer(body),
-	);
-	return new Uint8Array(pt);
+	try {
+		const pt = await crypto.subtle.decrypt(
+			{
+				name: 'AES-GCM',
+				iv: asArrayBuffer(iv),
+				additionalData: asArrayBuffer(header),
+				tagLength: AEAD_TAG_BYTES * 8,
+			},
+			key.cryptoKey,
+			asArrayBuffer(body),
+		);
+		return new Uint8Array(pt);
+	} catch {
+		throw new AEADAuthError(
+			`sframe: AEAD auth failed for kid=${hdr.kid} ctr=${hdr.ctr}`,
+			{ kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr },
+		);
+	}
 }
 
 /**

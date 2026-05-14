@@ -100,8 +100,13 @@ export interface EpochKey {
 	key: SFrameKey;
 }
 
-/** Structured error raised for decrypt failures surfaced to the main thread. */
-export interface SFrameError {
+/**
+ * Structured event emitted to the main thread on decrypt failures.
+ * Renamed from `SFrameError` (iteration 2) to make room for the typed error
+ * class hierarchy in `errors.ts`. Re-exported as `SFrameDecryptEvent` from
+ * the public barrel.
+ */
+export interface SFrameDecryptEvent {
 	reason:
 		| 'decrypt_failed'
 		| 'key_not_found'

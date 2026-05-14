@@ -21,6 +21,7 @@ import { createWorkerState, handleMessage, installEpoch } from '../worker-state.
 import { encodeFrame, decodeFrame, drainPreEpochQueue } from '../worker-frame.ts';
 import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
+import { StaleEpochError } from '../errors.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers (duplicated from sframe.integration.test.ts — test-only code)
@@ -116,7 +117,7 @@ describe('Scenario 3: ratchet forward + grace window', () => {
 			expect(receiver.currentMinValidEpoch).toBe(1);
 
 			const rxA = makeFrame(new Uint8Array(txA.data));
-			await expect(decodeFrame(receiver, rxA)).rejects.toThrow('stale_epoch');
+			await expect(decodeFrame(receiver, rxA)).rejects.toThrow(StaleEpochError);
 			expect(
 				emitted.some((m) => m.type === 'decrypt_failure' && m.reason === 'stale_epoch'),
 			).toBe(true);
@@ -190,7 +191,7 @@ describe('Scenario 4: epoch invalidation', () => {
 			expect(receiver.currentMinValidEpoch).toBe(1);
 
 			const rxE0 = makeFrame(sealedE0);
-			await expect(decodeFrame(receiver, rxE0)).rejects.toThrow('stale_epoch');
+			await expect(decodeFrame(receiver, rxE0)).rejects.toThrow(StaleEpochError);
 			expect(
 				emitted.some((m) => m.type === 'decrypt_failure' && m.reason === 'stale_epoch'),
 			).toBe(true);
@@ -258,8 +259,8 @@ describe('Scenario 4: epoch invalidation', () => {
 			expect(receiver.currentMinValidEpoch).toBe(2);
 
 			// Epoch 0 and 1 rejected
-			await expect(decodeFrame(receiver, makeFrame(sealedE0))).rejects.toThrow('stale_epoch');
-			await expect(decodeFrame(receiver, makeFrame(sealedE1))).rejects.toThrow('stale_epoch');
+			await expect(decodeFrame(receiver, makeFrame(sealedE0))).rejects.toThrow(StaleEpochError);
+			await expect(decodeFrame(receiver, makeFrame(sealedE1))).rejects.toThrow(StaleEpochError);
 
 			// Epoch 2 accepted
 			const rxE2 = makeFrame(sealedE2);

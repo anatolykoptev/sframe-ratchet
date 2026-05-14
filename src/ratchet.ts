@@ -11,6 +11,7 @@ import type {
 	PeerIndex,
 	SFrameKey,
 } from './types.ts';
+import { KeyNotFoundError } from './errors.ts';
 import {
 	deriveEpochKeyTable,
 	deriveSenderKeys,
@@ -154,9 +155,16 @@ export class RoomRatchet {
 	/** This node's per-sender SFrame key for the current epoch (idempotent; no per-frame ratchet in v1). */
 	advanceSending(): SFrameKey {
 		const state = this.epochs.get(this.currentEpoch);
-		if (!state) throw new Error('ratchet: no active epoch');
+		if (!state) {
+			throw new KeyNotFoundError('ratchet: no active epoch', { epoch: this.currentEpoch });
+		}
 		const key = state.keys.get(state.selfPeerIndex);
-		if (!key) throw new Error('ratchet: no self key in current epoch');
+		if (!key) {
+			throw new KeyNotFoundError('ratchet: no self key in current epoch', {
+				epoch: this.currentEpoch,
+				peerIndex: state.selfPeerIndex,
+			});
+		}
 		return key;
 	}
 

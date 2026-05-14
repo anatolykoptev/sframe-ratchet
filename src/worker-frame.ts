@@ -17,6 +17,7 @@ import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
+import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, StaleEpochError } from './errors.ts';
 
 export function pipe(
 	state: WorkerState,
@@ -150,9 +151,13 @@ async function tryDecryptWithRatchet(
 	peerIndex: PeerIndex,
 ): Promise<Uint8Array> {
 	const entry = state.epochs.get(epoch);
-	if (!entry) throw new Error(`sframe: no epoch entry for epoch=${epoch}`);
+	if (!entry) {
+		throw new KeyNotFoundError(`sframe: no epoch entry for epoch=${epoch}`, { epoch, peerIndex });
+	}
 	const key = entry.keys.get(peerIndex);
-	if (!key) throw new Error(`sframe: key not found for epoch=${epoch} peer=${peerIndex}`);
+	if (!key) {
+		throw new KeyNotFoundError(`sframe: key not found for epoch=${epoch} peer=${peerIndex}`, { epoch, peerIndex });
+	}
 
 	// Step 0 — try the currently cached key.
 	let firstError: unknown;
@@ -190,8 +195,11 @@ async function tryDecryptWithRatchet(
 		}
 	}
 
-	// Window exhausted — surface the original failure.
-	throw firstError;
+	// Window exhausted — wrap in a typed error so callers can branch on it.
+	throw new RatchetWindowExhaustedError(
+		`sframe: ratchet window exhausted (${state.ratchetWindowSize} steps) for epoch=${epoch} peer=${peerIndex}`,
+		{ epoch, peerIndex, attempts: state.ratchetWindowSize },
+	);
 }
 
 export async function decodeFrame(
@@ -244,7 +252,10 @@ export async function decodeFrame(
 				type: 'decrypt_failure', reason: 'stale_epoch',
 				kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
 			});
-			throw new Error('stale_epoch');
+			throw new StaleEpochError(
+				`sframe: stale epoch ${epoch} (min valid: ${state.currentMinValidEpoch})`,
+				{ frameEpoch: epoch, minValidEpoch: state.currentMinValidEpoch, kid: hdr.kid },
+			);
 		}
 		// M3.5: pre-epoch race guard. If NO epoch has ever been installed yet
 		// (currentEpoch === -1), this receiver is still waiting for its first
@@ -271,15 +282,16 @@ export async function decodeFrame(
 		plaintext.set(opened, N);
 		frame.data = toExclusiveArrayBuffer(plaintext);
 	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		if (msg !== 'stale_epoch') {
+		// StaleEpochError already emitted its decrypt_failure event above.
+		if (!(err instanceof StaleEpochError)) {
+			const detail = err instanceof Error ? err.message : String(err);
 			state.emit({
 				type: 'decrypt_failure', reason: 'decrypt_failed',
 				kid: hdrKid >= 0 ? hdrKid : undefined,
 				epoch: hdrEpoch >= 0 ? hdrEpoch : undefined,
 				peerIndex: hdrPeerIndex >= 0 ? hdrPeerIndex : undefined,
 				ctr: hdrCtr,
-				detail: msg,
+				detail,
 			});
 		}
 		throw err;

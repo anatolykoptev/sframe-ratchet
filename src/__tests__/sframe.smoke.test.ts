@@ -11,6 +11,7 @@ import { createWorkerState, handleMessage } from '../worker-state.ts';
 import { decodeFrame, encodeFrame } from '../worker-frame.ts';
 import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
+import { StaleEpochError } from '../errors.ts';
 
 // --- existing smoke tests, updated for the new API ------------------------
 
@@ -190,7 +191,7 @@ describe('sframe smoke', () => {
 			// Now feed the stale-epoch-0 frame into decodeFrame; must be rejected
 			// with decrypt_failure{reason: 'stale_epoch'} BEFORE any decrypt attempt.
 			const frame = makeFrame(staleBody);
-			await expect(decodeFrame(state, frame)).rejects.toThrow('stale_epoch');
+			await expect(decodeFrame(state, frame)).rejects.toThrow(StaleEpochError);
 			expect(
 				emitted.some((m) => m.type === 'decrypt_failure' && m.reason === 'stale_epoch'),
 			).toBe(true);

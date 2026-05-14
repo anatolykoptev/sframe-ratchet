@@ -155,3 +155,25 @@ The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-G
 | `codec-partial.ts` | `getUnencryptedBytes(codec, frameKind) → number`: codec-to-prefix-byte-count table for partial encryption. |
 | `sif-trailer.ts` | `DEFAULT_SIF_TRAILER` constant and `getDefaultSifTrailer()` accessor for the SIF trailer feature. |
 | `internal/buffer.ts` | `toArrayBuffer` helper to keep WebCrypto happy across SAB-backed and plain `Uint8Array` inputs. |
+| `errors.ts` | Typed error class hierarchy — all domain errors extend `SFrameError`. |
+
+## Error handling
+
+All domain errors extend the abstract base `SFrameError` (from `src/errors.ts`), which carries a stable `code` string and a typed `context` object. Callers can branch on error class instead of parsing message strings:
+
+```ts
+if (err instanceof StaleEpochError) {
+  const { frameEpoch, minValidEpoch } = err.context;
+}
+```
+
+| Class | Code | Thrown when |
+|-------|------|-------------|
+| `KeyNotFoundError` | `KEY_NOT_FOUND` | Decrypt path cannot find a key for (epoch, peerIndex) — epoch missing or peer not in key table. |
+| `StaleEpochError` | `STALE_EPOCH` | Frame's epoch is below `currentMinValidEpoch` — frame discarded before any AEAD attempt (spec §7.4). |
+| `AEADAuthError` | `AEAD_AUTH_FAIL` | AES-GCM tag check failed — key mismatch, corrupt frame, or wrong nonce. |
+| `RatchetWindowExhaustedError` | `RATCHET_WINDOW_EXHAUSTED` | Forward ratchet retry window exhausted without a matching key. |
+| `HeaderParseError` | `HEADER_PARSE` | SFrame header is malformed — empty buffer, truncated KID/CTR, or KID out of safe-integer range. |
+| `QueueFullError` | `QUEUE_FULL` | Pre-epoch ring buffer overflow (oldest frame dropped; this error is available for programmatic detection). |
+
+Programmer-mistake / invariant violations (e.g. calling `startNewEpoch` on a non-author without a `viaChainKey`) remain as generic `Error` or `TypeError`.

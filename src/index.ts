@@ -11,12 +11,23 @@ export type {
 	MemberChange,
 	PeerIdentity,
 	PeerIndex,
-	SFrameError,
+	SFrameDecryptEvent,
 	SFrameKey,
 	SFrameKeyLookup,
 	SFrameKeyResolver,
 	SFrameSupport,
 } from './types.js';
+
+// ---- Typed error hierarchy ------------------------------------------------
+export {
+	SFrameError,
+	KeyNotFoundError,
+	StaleEpochError,
+	AEADAuthError,
+	RatchetWindowExhaustedError,
+	HeaderParseError,
+	QueueFullError,
+} from './errors.js';
 
 // ---- SFrame AEAD ----------------------------------------------------------
 export { sframeEncrypt, sframeDecrypt } from './sframe.js';

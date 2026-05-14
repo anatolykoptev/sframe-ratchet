@@ -2,6 +2,8 @@
 // Split out from sframe.ts to keep the AEAD module focused on the WebCrypto
 // pipeline; this file is the wire-format layer.
 
+import { HeaderParseError } from './errors.ts';
+
 /**
  * Parsed SFrame header. `bodyOffset` is the number of bytes consumed from the
  * input buffer — the ciphertext (including 16-byte GCM tag) starts there.
@@ -50,9 +52,11 @@ export function serializeHeader(kid: number, ctr: bigint): Uint8Array {
 	return header;
 }
 
-/** Parse an RFC 9605 §4.3 header. Pure. Throws on malformed input. */
+/** Parse an RFC 9605 §4.3 header. Pure. Throws HeaderParseError on malformed input. */
 export function parseHeader(buf: Uint8Array): SFrameHeader {
-	if (buf.length < 1) throw new Error('sframe: empty buffer');
+	if (buf.length < 1) {
+		throw new HeaderParseError('sframe: empty buffer', { bufferLength: 0 });
+	}
 	const cfg = buf[0];
 	const kExt = (cfg & 0b1000_0000) !== 0;
 	const klen = (cfg >> 4) & 0b111; // byte count - 1 when kExt=1
@@ -63,7 +67,9 @@ export function parseHeader(buf: Uint8Array): SFrameHeader {
 	let kid: number;
 	if (kExt) {
 		const need = klen + 1;
-		if (buf.length < offset + need) throw new Error('sframe: short kid');
+		if (buf.length < offset + need) {
+			throw new HeaderParseError('sframe: short kid', { bufferLength: buf.length });
+		}
 		kid = readBigEndianNumber(buf, offset, need);
 		offset += need;
 	} else {
@@ -73,7 +79,9 @@ export function parseHeader(buf: Uint8Array): SFrameHeader {
 	let ctr: bigint;
 	if (cExt) {
 		const need = clen + 1;
-		if (buf.length < offset + need) throw new Error('sframe: short ctr');
+		if (buf.length < offset + need) {
+			throw new HeaderParseError('sframe: short ctr', { bufferLength: buf.length });
+		}
 		ctr = readBigEndianBigInt(buf, offset, need);
 		offset += need;
 	} else {
@@ -116,7 +124,7 @@ function readBigEndianNumber(buf: Uint8Array, off: number, len: number): number 
 		out = out * 256 + buf[off + i];
 	}
 	if (!Number.isSafeInteger(out)) {
-		throw new RangeError('sframe: extended KID exceeds safe integer range');
+		throw new HeaderParseError('sframe: extended KID exceeds safe integer range', { bufferLength: buf.length });
 	}
 	return out;
 }
