@@ -8,11 +8,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anatoliikoptev/sframe-ratchet.git"
+    "url": "git+https://github.com/anatolykoptev/sframe-ratchet.git"
   },
-  "homepage": "https://github.com/anatoliikoptev/sframe-ratchet#readme",
+  "homepage": "https://github.com/anatolykoptev/sframe-ratchet#readme",
   "bugs": {
-    "url": "https://github.com/anatoliikoptev/sframe-ratchet/issues"
+    "url": "https://github.com/anatolykoptev/sframe-ratchet/issues"
   },
   "engines": {
     "node": ">=20"

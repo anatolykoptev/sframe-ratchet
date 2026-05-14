@@ -20,5 +20,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - KID packing helpers (`makeKid`, `joinKid`, `splitKid`, `buildPeerIndexMap`, `validatePeerIndexMap`)
 - 38-test suite covering AEAD, ratchet epoch lifecycle, worker frame queue, and transit-only mode
 
-[Unreleased]: https://github.com/anatoliikoptev/sframe-ratchet/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/anatoliikoptev/sframe-ratchet/releases/tag/v0.1.0
+[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/anatolykoptev/sframe-ratchet/releases/tag/v0.1.0

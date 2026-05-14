@@ -1,7 +1,7 @@
 # sframe-ratchet
 
 [![npm](https://img.shields.io/npm/v/sframe-ratchet)](https://www.npmjs.com/package/sframe-ratchet)
-[![CI](https://github.com/anatoliikoptev/sframe-ratchet/actions/workflows/ci.yml/badge.svg)](https://github.com/anatoliikoptev/sframe-ratchet/actions/workflows/ci.yml)
+[![CI](https://github.com/anatolykoptev/sframe-ratchet/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolykoptev/sframe-ratchet/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
 RFC 9605 SFrame AEAD with an epoch ratchet and Web Worker pipeline, for group end-to-end encryption in browser WebRTC.
