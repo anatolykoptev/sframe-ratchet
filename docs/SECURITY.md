@@ -86,6 +86,43 @@ The caller is responsible for:
 - **Enforcing membership policy.** The ratchet does not authorize joins. If you allow a peer in, they get the current chain key.
 - **Versioning.** The on-wire format is `0.1.0` and may change. Pin your version across all peers in a call.
 
+## Side channels
+
+### SIF trailer comparison
+
+The SIF trailer byte comparison uses a branchless XOR-OR fold
+(`src/internal/constant-time.ts`). Every byte of the suffix region is always
+visited regardless of where a mismatch occurs, removing the most obvious
+branch-predictable timing oracle that would be exploitable by an in-process or
+same-origin attacker.
+
+**JS runtime limitation.** This does NOT guarantee wall-clock constant time.
+The V8/SpiderMonkey JIT, garbage collector, CPU branch predictor, and cache
+effects can all introduce timing variance that a sufficiently precise observer
+can exploit. For cryptographic proof of constant time (e.g. FIPS 140-3), a
+hardware-attested runtime with a formally-verified crypto library is required.
+The practical risk here is low — the trailer is not a security boundary (it is
+a routing hint; see the SIF trailer section of this file) — but the
+branchless pattern is used as a defence-in-depth measure and as a template for
+any future comparisons that do carry security weight.
+
+### AEAD tag verification
+
+AES-GCM tag verification is delegated entirely to the host WebCrypto
+implementation (`crypto.subtle.decrypt`). Constant-time tag comparison is the
+responsibility of the underlying platform AEAD implementation. No tag
+comparison is performed in JavaScript.
+
+### Known non-constant-time spots
+
+- The SFrame header parse (`src/sframe-header.ts`) performs data-dependent
+  branches on the header byte. Header fields (KID, CTR) are not secret; this
+  is not a timing oracle for key material.
+- Epoch selection and the stale-epoch gate (`worker-frame.ts`) branch on
+  epoch numbers, which are public metadata in SFrame.
+- `src/ratchet-crypto.ts` HKDF derivations go through WebCrypto; the
+  constant-time guarantees of HKDF are the platform's responsibility.
+
 ## Reporting vulnerabilities
 
 Please report security issues via GitHub Security Advisories on the repository, or by email to the maintainer listed in `package.json`. Do not open public issues for unpatched vulnerabilities.

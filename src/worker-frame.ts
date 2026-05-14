@@ -15,6 +15,7 @@ import { splitKid } from './ratchet-ids.ts';
 import { deriveNextSenderKey } from './ratchet-crypto.ts';
 import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
+import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
 import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, StaleEpochError } from './errors.ts';
@@ -117,15 +118,6 @@ export async function encodeFrame(
 	});
 }
 
-/** Returns true iff `buf` ends with `suffix`. */
-function endsWith(buf: Uint8Array, suffix: Uint8Array): boolean {
-	if (buf.byteLength < suffix.byteLength) return false;
-	const offset = buf.byteLength - suffix.byteLength;
-	for (let i = 0; i < suffix.byteLength; i++) {
-		if (buf[offset + i] !== suffix[i]) return false;
-	}
-	return true;
-}
 
 /**
  * Attempt to decrypt `buf` (full SFrame: header+ciphertext+tag) using the
@@ -227,7 +219,7 @@ export async function decodeFrame(
 	const trailer = state.sifTrailer;
 	let payload = raw; // view of the bytes to decrypt (trailer-stripped if applicable)
 	if (trailer !== undefined) {
-		if (!endsWith(raw, trailer)) {
+		if (!ctEndsWith(raw, trailer)) {
 			// Non-E2EE frame — pass through unchanged.
 			if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
 				console.debug('[sframe] SIF pass-through: no trailer, treating as plain frame');
