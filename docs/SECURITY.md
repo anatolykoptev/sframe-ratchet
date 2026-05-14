@@ -69,6 +69,8 @@ const ratchet = new RoomRatchet({
 
 **Breaking change from 0.1.0:** The default suite changed from an undocumented 32-byte-AES-256-SHA-256 combination (which matched no RFC 9605 suite) to AES-128-GCM + SHA-256 (RFC 9605 suite 4). Frames encrypted with the 0.1.0 code path cannot be decrypted with 0.2.0 code. See `CHANGELOG.md` for migration notes.
 
+**Strict mode:** For deployments that need a runtime guardrail against weaker configurations, use `enableStrictFips()` (see [`docs/COMPLIANCE.md`](./COMPLIANCE.md) for the full compliance posture and an attestation template).
+
 ## Key handling guarantees
 
 - **Chain keys are derived on the main thread** and held there for the lifetime of an epoch. They are never serialized over `postMessage` as raw bytes. The `FrameCryptor.setEpoch` API takes a chain key on main, derives the per-sender key table locally, and posts only the resulting `CryptoKey` handles to the worker.

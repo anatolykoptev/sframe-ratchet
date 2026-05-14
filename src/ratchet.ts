@@ -12,6 +12,7 @@ import type {
 	SFrameKey,
 } from './types.ts';
 import { KeyNotFoundError } from './errors.ts';
+import { assertSuiteAllowed } from './strict-fips.ts';
 import {
 	DEFAULT_CIPHER_SUITE,
 	type CipherSuite,
@@ -69,6 +70,7 @@ export class RoomRatchet {
 	constructor(opts: RoomRatchetOptions) {
 		this.identity = opts.identity;
 		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
+		assertSuiteAllowed(this.suite);
 		this.peers = new Map();
 		for (const p of opts.initialPeers ?? []) this.peers.set(p.peerId, p);
 	}

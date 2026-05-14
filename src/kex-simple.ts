@@ -23,6 +23,7 @@ import {
 	type CipherSuite,
 	suiteParams,
 } from './ratchet-crypto.ts';
+import { assertNotSimpleKex } from './strict-fips.ts';
 
 // Default salt — a static constant so the library works out-of-the-box.
 // Production MUST override with a unique random salt per room to prevent
@@ -113,6 +114,7 @@ export class SimpleKex {
   readonly suite: CipherSuite;
 
   constructor(config: SimpleKexConfig) {
+    assertNotSimpleKex();
     if (!config.sharedSecret) {
       throw new TypeError('SimpleKex: sharedSecret must be a non-empty string');
     }

@@ -27,7 +27,16 @@ export {
 	RatchetWindowExhaustedError,
 	HeaderParseError,
 	QueueFullError,
+	FipsModeViolationError,
 } from './errors.js';
+
+// ---- Strict-FIPS mode ----------------------------------------------------
+export {
+	enableStrictFips,
+	disableStrictFips,
+	getStrictFips,
+} from './strict-fips.js';
+export type { StrictFipsOptions } from './strict-fips.js';
 
 // ---- SFrame AEAD ----------------------------------------------------------
 export { sframeEncrypt, sframeDecrypt } from './sframe.js';

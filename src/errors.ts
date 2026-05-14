@@ -114,3 +114,21 @@ export class QueueFullError extends SFrameError {
 		super(message, context);
 	}
 }
+
+/**
+ * A strict-FIPS policy violation. Thrown when an operation (cipher suite
+ * selection, SimpleKex construction, etc.) violates the active
+ * {@link enableStrictFips} configuration.
+ *
+ * Check `err.code === 'FIPS_VIOLATION'` or `err instanceof FipsModeViolationError`.
+ */
+export class FipsModeViolationError extends SFrameError {
+	readonly code = 'FIPS_VIOLATION' as const;
+
+	constructor(
+		message: string,
+		public override readonly context?: Record<string, unknown>,
+	) {
+		super(message, context);
+	}
+}

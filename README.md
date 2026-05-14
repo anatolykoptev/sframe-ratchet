@@ -48,6 +48,41 @@ const ratchet = new RoomRatchet({
 });
 ```
 
+### FIPS strict mode
+
+For regulated deployments that must prevent any weaker configuration from being used at runtime, enable strict mode at application startup:
+
+```ts
+import { enableStrictFips } from 'sframe-ratchet';
+
+// Call once, as early as possible (before any RoomRatchet / FrameCryptor construction).
+enableStrictFips();
+// From this point on:
+//   • AES_128_GCM_SHA256 (suite 4) → throws FipsModeViolationError
+//   • SimpleKex construction        → throws FipsModeViolationError (no compromise recovery)
+//   • WebCrypto importKey           → always non-extractable (enforced by implementation)
+```
+
+Strict mode is **off by default** — no breaking change for existing users.
+
+Individual checks can be relaxed:
+
+```ts
+enableStrictFips({ requireSuite5: false });   // allow suite 4, still forbid SimpleKex
+enableStrictFips({ forbidSimpleKex: false }); // forbid suite 4, allow SimpleKex
+```
+
+To restore permissive behaviour at any time:
+
+```ts
+import { disableStrictFips } from 'sframe-ratchet';
+disableStrictFips();
+```
+
+`FipsModeViolationError` extends `SFrameError` with `.code === 'FIPS_VIOLATION'`.
+
+See [`docs/COMPLIANCE.md`](./docs/COMPLIANCE.md) for the full compliance posture and attestation template.
+
 ## Install
 
 ```bash

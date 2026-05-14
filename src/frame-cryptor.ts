@@ -9,6 +9,7 @@
 
 import type { PeerIndex, SFrameSupport } from './types.ts';
 import { DEFAULT_CIPHER_SUITE, type CipherSuite, deriveEpochKeyTable } from './ratchet-crypto.ts';
+import { assertSuiteAllowed } from './strict-fips.ts';
 
 export { validatePeerIndexMap } from './ratchet-ids.ts';
 
@@ -89,6 +90,7 @@ export class FrameCryptor {
 		this.role = opts.role;
 		this.peerId = opts.peerId;
 		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
+		assertSuiteAllowed(this.suite);
 		this.currentPeerIndex = opts.peerIndex;
 		const { native, fallback } = supportsSFrame();
 		this.transitOnly = !native && !fallback;

@@ -106,6 +106,26 @@ export async function x25519Dh(
 	return x25519.getSharedSecret(privateKey, peerPublicKey);
 }
 
+// --- AES-GCM key import helper --------------------------------------------
+
+/**
+ * Import raw bytes as a non-extractable AES-GCM CryptoKey.
+ *
+ * `extractable` is hard-coded to `false` — the library never needs to read
+ * raw key bytes back from WebCrypto. This also satisfies the strict-FIPS
+ * `requireNonExtractable` policy without any runtime check: the API simply
+ * does not expose extractability.
+ *
+ * // strict-fips: non-extractable enforced by parameter
+ *
+ * @internal
+ */
+async function importAesKey(raw: ArrayBuffer, usages: KeyUsage[]): Promise<CryptoKey> {
+	return crypto.subtle.importKey(
+		'raw', raw, { name: 'AES-GCM' }, false /* extractable */, usages,
+	);
+}
+
 // --- HKDF / key-wrap ------------------------------------------------------
 
 async function hkdfExtractExpand(
@@ -139,9 +159,7 @@ async function hkdfExtractExpand(
  */
 export async function deriveWrapKey(shared: Uint8Array, version: number): Promise<CryptoKey> {
 	const raw = await hkdfExtractExpand(shared, INFO_WRAP(version), 32, 'SHA-256');
-	return crypto.subtle.importKey(
-		'raw', asArrayBuffer(raw), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'],
-	);
+	return importAesKey(asArrayBuffer(raw), ['encrypt', 'decrypt']);
 }
 
 /** Wrap a ChainKey under an AES-GCM wrap key with a fresh 12-byte IV. */
@@ -189,9 +207,7 @@ export async function deriveSenderKeys(
 		hkdfExtractExpand(chainKey, hkdfInfo(SFRAME_INFO_KEY, peerIndex), params.aeadKeyBytes, params.hash),
 		hkdfExtractExpand(chainKey, hkdfInfo(SFRAME_INFO_SALT, peerIndex), SFRAME_SALT_BYTES, params.hash),
 	]);
-	const cryptoKey = await crypto.subtle.importKey(
-		'raw', asArrayBuffer(keyRaw), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'],
-	);
+	const cryptoKey = await importAesKey(asArrayBuffer(keyRaw), ['encrypt', 'decrypt']);
 	return { kid: makeKid(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: keyRaw };
 }
 
@@ -252,8 +268,6 @@ export async function deriveNextSenderKey(
 		aeadKeyBytes,
 		hash,
 	);
-	const cryptoKey = await crypto.subtle.importKey(
-		'raw', asArrayBuffer(nextRaw), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'],
-	);
+	const cryptoKey = await importAesKey(asArrayBuffer(nextRaw), ['encrypt', 'decrypt']);
 	return { kid: makeKid(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: nextRaw };
 }
