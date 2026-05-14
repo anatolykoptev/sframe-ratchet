@@ -314,6 +314,10 @@ Event kinds: `encrypt`, `decrypt`, `decrypt_fail` (carries error `code`), `ratch
 
 [0.1.0](./CHANGELOG.md) — extracted from a production product and pared down to the parts that are independently useful. Test suite is 38/38 green. API may change before 1.0.
 
+## Compliance
+
+`sframe-ratchet` uses only NIST-approved primitives (AES-GCM, HKDF-SHA-2, X25519), wraps WebCrypto to enforce non-extractable keys, and provides an `enableStrictFips()` runtime guardrail that forces suite 5 (AES-256-GCM + HKDF-SHA-512) and rejects the demo KEX. The library is not, and as a JavaScript module cannot be, a FIPS 140-3 validated cryptographic module — validation status depends on the host runtime's WebCrypto provider. See [`docs/COMPLIANCE.md`](./docs/COMPLIANCE.md) for the full mapping to FIPS 140-3, HIPAA Security Rule, CNSA 2.0, and side-channel posture.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
