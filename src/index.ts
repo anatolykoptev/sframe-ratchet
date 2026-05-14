@@ -51,14 +51,9 @@ export type { RoomRatchetOptions } from './ratchet.js';
 export {
 	makeKid,
 	splitKid,
-	joinKid,
 	newIdentity,
 	validatePeerIndexMap,
 	buildPeerIndexMap,
-	hkdfInfo,
-	peerIndexBe16,
-	SFRAME_INFO_KEY,
-	SFRAME_INFO_SALT,
 } from './ratchet-ids.js';
 export type { PeerIndexMapValidation } from './ratchet-ids.js';
 
