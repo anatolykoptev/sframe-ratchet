@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sframe-ratchet — mesh browser demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      background: #0d1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+      gap: 16px;
+    }
+    h1 { font-size: 20px; font-weight: 600; color: #f0f6fc; }
+    .subtitle { color: #8b949e; font-size: 13px; }
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    button {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #c9d1d9;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+    button:hover { background: #30363d; }
+    button.active { background: #238636; border-color: #2ea043; color: #fff; }
+    .peers {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      width: 100%;
+      max-width: 900px;
+    }
+    .peer {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .peer h2 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #f0f6fc;
+    }
+    .log {
+      height: 320px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Cascadia Code', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .log-entry { display: flex; gap: 8px; }
+    .log-entry .ts { color: #6e7681; flex-shrink: 0; }
+    .log-entry .cipher { color: #d29922; word-break: break-all; }
+    .log-entry .plain { color: #3fb950; }
+    .log-entry .label { color: #8b949e; flex-shrink: 0; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 8px;
+    }
+    .badge-on  { background: #1f6feb; color: #fff; }
+    .badge-off { background: #3d1f00; color: #d29922; }
+    .status { color: #8b949e; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>sframe-ratchet — mesh browser demo</h1>
+  <p class="subtitle">
+    Two simulated peers exchange SFrame-encrypted frames over a MessageChannel.
+    Encryption uses <code>SimpleKex</code> (shared password — demo only).
+  </p>
+
+  <div class="controls">
+    <button id="toggle-e2ee" class="active">E2EE: ON</button>
+    <span class="status" id="status">Initialising…</span>
+  </div>
+
+  <div class="peers">
+    <div class="peer">
+      <h2>Peer A — sender <span id="badge-a" class="badge badge-on">E2EE ON</span></h2>
+      <div class="log" id="log-a"></div>
+    </div>
+    <div class="peer">
+      <h2>Peer B — receiver <span id="badge-b" class="badge badge-on">E2EE ON</span></h2>
+      <div class="log" id="log-b"></div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "sframe-ratchet-example-roundtrip",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Minimal Node roundtrip: encrypt a frame with SimpleKex, decrypt it, assert match.",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "sframe-ratchet": "file:../..",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0"
+  }
+}

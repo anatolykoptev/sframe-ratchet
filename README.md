@@ -58,6 +58,8 @@ npm install sframe-ratchet @noble/curves @noble/hashes
 
 ## Quick start
 
+Want to run a complete working demo right now? See `examples/01-roundtrip/` for a 30-second Node script, or `examples/02-mesh-browser/` for an in-browser demo.
+
 ### Hello world with SimpleKex (NOT for production)
 
 > **⚠ SimpleKex is for demos and local development only.** It has no forward secrecy, no membership consensus, and no revocation. See `src/kex-simple.ts` and the class-level JSDoc for the full warning. For production, see "Production: bring your own KEX" below.
