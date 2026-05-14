@@ -3,7 +3,20 @@
   "version": "0.1.0",
   "type": "module",
   "description": "RFC 9605 SFrame AEAD with epoch ratchet for browser group E2EE",
+  "keywords": ["webrtc", "e2ee", "sframe", "rfc-9605", "ratchet", "encryption", "webcrypto", "x25519"],
+  "author": "Anatolii Koptev",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatoliikoptev/sframe-ratchet.git"
+  },
+  "homepage": "https://github.com/anatoliikoptev/sframe-ratchet#readme",
+  "bugs": {
+    "url": "https://github.com/anatoliikoptev/sframe-ratchet/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",

@@ -1,0 +1,117 @@
+# Architecture
+
+This document describes how `sframe-ratchet` is structured internally: the frame pipeline, the main/worker split, the ratchet state machine, and a file-by-file map of `src/`.
+
+## Frame pipeline
+
+The encode (send) path:
+
+```
+encoded frame (RTCEncoded{Video,Audio}Frame)
+        │
+        │  WritableStream provided by RTCRtpScriptTransform or createEncodedStreams
+        ▼
+   ┌──────────────────────────────────────────────┐
+   │  worker-frame.encodeFrame                    │
+   │    1. ratchet lookup: key for current epoch  │
+   │    2. allocate sender-wide monotonic CTR     │
+   │    3. sframeEncrypt(plaintext, key, ctr)     │
+   │       a. serializeHeader(kid, ctr)           │
+   │       b. iv = salt XOR be96(ctr)             │
+   │       c. AES-GCM encrypt; AAD = header bytes │
+   │    4. replace frame.data with [hdr][ct+tag]  │
+   └──────────────────────────────────────────────┘
+        │
+        ▼
+   ReadableStream — back to RTCRtpSender
+```
+
+The decode (receive) path:
+
+```
+ciphertext frame from RTCRtpReceiver
+        │
+        ▼
+   ┌──────────────────────────────────────────────┐
+   │  worker-frame.decodeFrame                    │
+   │    1. parseHeader → kid, ctr, bodyOffset     │
+   │    2. splitKid(kid) → epoch, peerIndex       │
+   │    3. stale-epoch gate:                      │
+   │         if epoch < currentMinValidEpoch      │
+   │         emit decrypt_failure{stale_epoch};   │
+   │         drop frame                           │
+   │    4. resolveKey({ kid, epoch, peerIndex })  │
+   │         null → emit key_not_found; drop      │
+   │    5. iv = salt XOR be96(ctr)                │
+   │    6. AES-GCM decrypt; AAD = header bytes    │
+   │    7. replace frame.data with plaintext      │
+   └──────────────────────────────────────────────┘
+        │
+        ▼
+   downstream decoder
+```
+
+Three queueing subtleties live inside the worker state machine:
+
+- **Pre-epoch queue.** Frames may arrive before the first `epoch` message has been processed (the join race). They are parked in `preEpochQueue` and drained when the first epoch installs.
+- **pendingDrain flag.** If a second `epoch` message arrives while the first drain is still suspended at an `await`, the early-return on `draining=true` would orphan frames queued for the second epoch. A `pendingDrain` flag re-runs the drain loop once more.
+- **Per-frame try/catch.** Frames are processed in a loop; an exception on frame N (e.g. `parseHeader` throwing on a corrupt header) must not abort the loop for frames N+1, N+2, etc. Each frame is wrapped individually.
+
+These three behaviors are covered by tests in `src/__tests__/sframe.smoke.test.ts`.
+
+## Main / worker split
+
+`CryptoKey` is the natural boundary. WebCrypto guarantees that an imported non-extractable key cannot be exported back to raw bytes from JavaScript. By doing the import on the main thread and posting only the resulting handle to the worker, two things hold simultaneously:
+
+- The worker performs AEAD without ever holding raw key material that could leak through a future `postMessage` bug.
+- The main thread can drive epoch policy (when to rotate, which peers are members) without needing AEAD primitives — those live entirely in the worker.
+
+The chain key itself does briefly exist as bytes on the main thread (because `deriveEpochKeyTable` runs there). It is wiped from JS reachability when the corresponding `EpochState` is forgotten after the 5-second grace window. The package does not — and in JS cannot — zero memory; this is a residual exposure called out in `SECURITY.md`.
+
+Posting to the worker uses `postMessage` with transferable buffers where applicable. Frame `data` is an `ArrayBuffer` that the transform handoff owns; mutating it in place is the standard pattern for encoded-frame transforms and is what `worker-frame` does.
+
+## Ratchet state machine
+
+`RoomRatchet` maintains `epochs: Map<number, EpochState>` and a `currentEpoch` cursor. Each epoch is in one of four logical states:
+
+```
+   pending           active            retiring            forgotten
+  ──────────►       ─────────►        ─────────►          ─────────►
+  (not yet         (currentEpoch     (currentEpoch       (removed
+   installed;       == v; sender      moved past v;       from epochs
+   frames go        derives self      receiver still      map; resolver
+   to pre-          key from this     decrypts via         returns null;
+   epoch queue)     epoch's table)    getReceivingKey;     decodeFrame
+                                      5 s grace timer      stale-epoch
+                                      pending)             gate fires)
+```
+
+Transitions:
+
+- **pending → active:** `installEpoch(version, chainKey, peerIndexMap)` is called, either from `startNewEpoch` (this node authored the epoch) or from `consumeEpochAnnouncement` (this node received a wrapped chain key from the author). If `version > currentEpoch`, `currentEpoch` is bumped and the previous epoch enters `retiring`.
+- **active → retiring:** triggered by the bump in `installEpoch`; a `setTimeout` for 5,000 ms is scheduled with `forgetEpoch(prev)`.
+- **retiring → forgotten:** the timer fires (or `forgetEpoch` is called explicitly). The `EpochState` is removed from the map; subsequent `getReceivingKey(prev, pi)` returns `null`.
+
+Authorship rule: the peer whose `peerId` is lexicographically smallest across the current member set is the **authoritative author** of new epochs. They mint random chain keys; other peers wait for an `EpochAnnouncement` addressed to them. `rotateOnMemberChange` is a no-op (returns `[]`) on non-author nodes.
+
+The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-GCM key derived (via HKDF) from an X25519 DH shared secret between the author's ephemeral key and the recipient's identity key. There is one announcement per recipient — the `peer_index_map` is identical across all of them so every recipient agrees on the per-sender peer-index assignment.
+
+## File-by-file map
+
+`src/` contains 10 files plus tests and an `internal/` directory:
+
+| File | Role |
+|------|------|
+| `index.ts` | Public API barrel. The single export surface — anything not re-exported here is internal. |
+| `types.ts` | Cross-module type contracts (`SFrameKey`, `EpochAnnouncement`, `PeerIdentity`, `SFrameError`, etc.). |
+| `sframe.ts` | RFC 9605 AEAD encrypt/decrypt. IV derivation, AES-GCM glue, resolver dispatch. |
+| `sframe-header.ts` | Header codec: `parseHeader` / `serializeHeader` over the 32-bit KID + variable-width CTR layout. |
+| `ratchet.ts` | `RoomRatchet` class: epoch lifecycle, member changes, announcement mint/consume, 5 s grace wipe. |
+| `ratchet-crypto.ts` | Primitives: HKDF chain-key derivation, X25519 DH (WebCrypto + noble fallback), AES-GCM wrap/unwrap. |
+| `ratchet-ids.ts` | KID pack/unpack, peer-index map build/validate, HKDF info constants, announcement wrap helper. |
+| `frame-cryptor.ts` | `FrameCryptor` class: main-thread glue between an `RTCRtpSender` / `RTCRtpReceiver` and the worker. |
+| `worker.ts` | Worker entry point. Wires `onrtctransform` and the `postMessage` fallback to the state machine. |
+| `worker-state.ts` | Per-worker state: current epoch, key table, pre-epoch queue, message dispatch. |
+| `worker-frame.ts` | Encoded-frame I/O: `encodeFrame`, `decodeFrame`, the read/write stream pipe, drain loop. |
+| `worker-types.ts` | Worker `postMessage` contract: `InMsg`, `OutMsg`, `PerSenderKeyBundle`, `Side`. |
+| `internal/buffer.ts` | `toArrayBuffer` helper to keep WebCrypto happy across SAB-backed and plain `Uint8Array` inputs. |
