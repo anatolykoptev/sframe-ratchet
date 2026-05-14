@@ -64,3 +64,7 @@ export type { FrameCryptorOptions, EpochParams } from './frame-cryptor.js';
 // ---- Codec-aware partial encryption --------------------------------------
 export { getUnencryptedBytes } from './codec-partial.js';
 export type { Codec, FrameKind } from './worker-types.js';
+
+// ---- SIF trailer (mixed-room support) ------------------------------------
+export { DEFAULT_SIF_TRAILER, getDefaultSifTrailer } from './sif-trailer.js';
+export type { SetSifTrailerMsg } from './worker-types.js';

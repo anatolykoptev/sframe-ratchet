@@ -34,16 +34,20 @@ encoded frame (RTCEncoded{Video,Audio}Frame)
 Wire format on the network (codec-aware mode, N > 0):
 
 ```
-┌─────────────────────┬────────────────┬──────────────────────────┐
-│  unencrypted prefix │  SFrame header │  AES-GCM ciphertext+tag  │
-│     (N bytes)       │  (variable)    │  (body length + 16 tag)  │
-└─────────────────────┴────────────────┴──────────────────────────┘
- ↑                     ↑
- SFU reads here         SFrame parser starts here (receiver peels N first)
- for routing/kind
+┌─────────────────────┬────────────────┬──────────────────────────┬────────────────────────┐
+│  unencrypted prefix │  SFrame header │  AES-GCM ciphertext+tag  │  SIF trailer (optional)│
+│     (N bytes)       │  (variable)    │  (body length + 16 tag)  │  (T bytes, if enabled) │
+└─────────────────────┴────────────────┴──────────────────────────┴────────────────────────┘
+ ↑                     ↑                                            ↑
+ SFU reads here         SFrame parser starts here (receiver         Present iff `sifTrailer`
+ for routing/kind       peels N first)                              is set on the worker.
+                                                                    NOT inside AES-GCM AAD.
+                                                                    Routing hint only.
 ```
 
-When no codec is configured (default), N = 0 and the format collapses to the standard SFrame layout `[hdr][ct+tag]` — unchanged from prior behaviour.
+When no codec is configured (default), N = 0 and the format collapses to `[hdr][ct+tag]` (plus optional trailer) — or the standard SFrame layout `[hdr][ct+tag]` when the SIF trailer is also disabled.
+
+**SIF trailer** (`sifTrailer` field on `WorkerState`, enabled via `set-sif-trailer` control message): an optional fixed-byte suffix appended after the ciphertext+tag. The receiver uses it to detect whether an incoming frame is SFrame-encrypted before attempting AEAD, enabling mixed-room deployments where some participants use E2EE and some do not. When a frame does not end with the configured trailer, the receiver treats it as a plain frame and passes it through unchanged without attempting decryption. The trailer is a routing hint only — see `docs/SECURITY.md` for known limitations.
 
 The decode (receive) path:
 
@@ -143,4 +147,5 @@ The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-G
 | `worker-frame.ts` | Encoded-frame I/O: `encodeFrame`, `decodeFrame`, the read/write stream pipe, drain loop. |
 | `worker-types.ts` | Worker `postMessage` contract: `InMsg`, `OutMsg`, `PerSenderKeyBundle`, `Side`, `Codec`, `FrameKind`. |
 | `codec-partial.ts` | `getUnencryptedBytes(codec, frameKind) → number`: codec-to-prefix-byte-count table for partial encryption. |
+| `sif-trailer.ts` | `DEFAULT_SIF_TRAILER` constant and `getDefaultSifTrailer()` accessor for the SIF trailer feature. |
 | `internal/buffer.ts` | `toArrayBuffer` helper to keep WebCrypto happy across SAB-backed and plain `Uint8Array` inputs. |

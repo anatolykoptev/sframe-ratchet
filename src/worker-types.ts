@@ -37,6 +37,11 @@ export interface RotateMsg {
 	keys: Map<PeerIndex, PerSenderKeyBundle>;
 }
 export interface TeardownMsg { type: 'teardown' }
+export interface SetSifTrailerMsg {
+	type: 'set-sif-trailer';
+	/** `null` disables the trailer; any `Uint8Array` enables it with that byte sequence. */
+	trailer: Uint8Array | null;
+}
 export interface StreamsMsg {
 	type: 'streams'; side: Side;
 	readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
@@ -44,7 +49,7 @@ export interface StreamsMsg {
 	/** Optional per-track codec; drives codec-aware partial encryption prefix. */
 	codec?: Codec;
 }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | StreamsMsg;
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | StreamsMsg;
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
@@ -82,6 +87,14 @@ export interface WorkerState {
 	emit: (msg: OutMsg) => void;
 	/** Per-track codec; drives codec-aware partial encryption.  Undefined = full encrypt. */
 	codec?: Codec;
+	/**
+	 * Optional SIF (Secure Interoperable Frame) trailer bytes.
+	 * When set, the encoder appends these bytes after the SFrame ciphertext, and the
+	 * decoder uses their presence to distinguish E2EE frames from plain frames in
+	 * mixed-room deployments. `undefined` = feature disabled; wire format unchanged.
+	 * The trailer is NOT inside AES-GCM AAD — it is a routing hint only.
+	 */
+	sifTrailer?: Uint8Array;
 }
 
 export const GRACE_WINDOW_MS = 2000;

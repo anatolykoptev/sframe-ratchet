@@ -95,11 +95,25 @@ export async function encodeFrame(
 
 	const sealed = await sframeEncrypt(body, key, ctr);
 
-	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag]
-	const wire = new Uint8Array(N + sealed.byteLength);
+	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag] [SIF trailer (optional)]
+	// The SIF trailer is appended OUTSIDE the AEAD — it is a routing hint, not a security boundary.
+	const trailer = state.sifTrailer;
+	const trailerLen = trailer ? trailer.byteLength : 0;
+	const wire = new Uint8Array(N + sealed.byteLength + trailerLen);
 	wire.set(prefix, 0);
 	wire.set(sealed, N);
+	if (trailer) wire.set(trailer, N + sealed.byteLength);
 	frame.data = toExclusiveArrayBuffer(wire);
+}
+
+/** Returns true iff `buf` ends with `suffix`. */
+function endsWith(buf: Uint8Array, suffix: Uint8Array): boolean {
+	if (buf.byteLength < suffix.byteLength) return false;
+	const offset = buf.byteLength - suffix.byteLength;
+	for (let i = 0; i < suffix.byteLength; i++) {
+		if (buf[offset + i] !== suffix[i]) return false;
+	}
+	return true;
 }
 
 export async function decodeFrame(
@@ -108,15 +122,35 @@ export async function decodeFrame(
 ): Promise<void> {
 	const raw = new Uint8Array(frame.data);
 
+	// SIF trailer gate — checked BEFORE codec prefix peel and BEFORE parseHeader.
+	// When a trailer is configured:
+	//   - Frame ends with trailer → strip it, proceed with normal decrypt on the remainder.
+	//   - Frame does NOT end with trailer → this is a non-E2EE (plain) frame.
+	//     Pass it through unchanged without attempting AEAD. This is the mixed-room case.
+	//     A short frame (shorter than the trailer) also falls here safely.
+	const trailer = state.sifTrailer;
+	let payload = raw; // view of the bytes to decrypt (trailer-stripped if applicable)
+	if (trailer !== undefined) {
+		if (!endsWith(raw, trailer)) {
+			// Non-E2EE frame — pass through unchanged.
+			if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
+				console.debug('[sframe] SIF pass-through: no trailer, treating as plain frame');
+			}
+			return; // frame.data untouched
+		}
+		// Strip the trailer — the rest of the pipeline sees only the SFrame bytes.
+		payload = raw.subarray(0, raw.byteLength - trailer.byteLength);
+	}
+
 	// Codec-aware prefix peel: receiver must know the codec (set via StreamsMsg)
 	// to determine N. Both sides must agree. N=0 when codec is unset (default).
 	// Clamp to frame length to handle truncated/corrupt frames safely.
 	const rawType = (frame as RTCEncodedVideoFrame).type;
 	const frameKind: FrameKind | undefined =
 		rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
-	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), raw.byteLength);
-	const prefix = raw.subarray(0, N);   // unencrypted prefix (not authenticated)
-	const buf = raw.subarray(N);         // [SFrame header][ciphertext+tag]
+	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), payload.byteLength);
+	const prefix = payload.subarray(0, N);   // unencrypted prefix (not authenticated)
+	const buf = payload.subarray(N);         // [SFrame header][ciphertext+tag]
 
 	let hdrKid = -1;
 	let hdrEpoch = -1;

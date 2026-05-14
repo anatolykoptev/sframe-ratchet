@@ -30,6 +30,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		draining: false,
 		emit,
 		codec: undefined,
+		sifTrailer: undefined,
 	};
 }
 
@@ -54,6 +55,9 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 		case 'streams':
 			if (msg.codec !== undefined) state.codec = msg.codec;
 			pipe(state, msg.side, msg.readable, msg.writable);
+			return;
+		case 'set-sif-trailer':
+			state.sifTrailer = msg.trailer ?? undefined;
 			return;
 		case 'teardown':
 			teardown(state);

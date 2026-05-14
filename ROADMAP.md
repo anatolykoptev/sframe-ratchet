@@ -20,8 +20,8 @@ Leave the first N bytes of payload unencrypted depending on codec:
 
 Lets SFUs route by frame type without seeing payload; gives browser decoders "graceful garbage" on key mismatch instead of fatal parse errors. The `TODO(#group-calls-vp8)` in `worker-frame.ts` already marks this. Pattern from `livekit/client-sdk-js` `FrameCryptor.ts:getUnencryptedBytes`.
 
-### SIF trailer for mixed-room support — M
-Optional fixed suffix on ciphertext that lets a receiver detect "this frame is SFrame-encrypted" before attempting decrypt. Solves the mixed-room case where some peers run E2EE and some do not. Wire-format change — gated behind a flag for compatibility. Pattern from LiveKit.
+### ~~SIF trailer for mixed-room support~~ — DONE
+Optional fixed suffix on ciphertext that lets a receiver detect "this frame is SFrame-encrypted" before attempting decrypt. Solves the mixed-room case where some peers run E2EE and some do not. Wire-format change — gated behind `sifTrailer` field (default `undefined` = disabled). Pattern from LiveKit. Shipped in `src/sif-trailer.ts`; control message `set-sif-trailer`; 14 tests.
 
 ### Ratchet retry window on decode — M
 On `decrypt_failed` for a known epoch, try ratcheting the key forward up to `ratchetWindowSize` steps (default 8) before giving up. Smooths over RTP/epoch desync during rotation. Distinct from our existing `preEpochQueue` (which handles "no epoch yet") and from epoch rotation itself. Pattern from LiveKit `ParticipantKeyHandler`.
