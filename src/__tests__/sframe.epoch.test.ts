@@ -16,33 +16,13 @@
 // TransformStream backpressure interact poorly).
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { deriveEpochKeyTable, randomChainKey } from '../ratchet-crypto.ts';
+import { randomChainKey } from '../ratchet-crypto.ts';
 import { createWorkerState, handleMessage, installEpoch } from '../worker-state.ts';
 import { encodeFrame, decodeFrame, drainPreEpochQueue } from '../worker-frame.ts';
-import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
+import type { OutMsg } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
 import { StaleEpochError } from '../errors.ts';
-
-// ---------------------------------------------------------------------------
-// Helpers (duplicated from sframe.integration.test.ts — test-only code)
-// ---------------------------------------------------------------------------
-
-async function bundlesFromMap(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndexMap: Record<string, PeerIndex>,
-): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
-	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
-	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
-	return out;
-}
-
-function makeFrame(body: Uint8Array): RTCEncodedVideoFrame {
-	const buf = new ArrayBuffer(body.byteLength);
-	new Uint8Array(buf).set(body);
-	return { data: buf } as unknown as RTCEncodedVideoFrame;
-}
+import { makeFrame, makeBundles } from './helpers.ts';
 
 const PEER_MAP: Record<string, PeerIndex> = { alice: 0, bob: 1 };
 
@@ -62,14 +42,14 @@ describe('Scenario 3: ratchet forward + grace window', () => {
 			const ck0 = randomChainKey();
 			const ck1 = randomChainKey();
 
-			const b0 = await bundlesFromMap(ck0, 0, PEER_MAP);
+			const b0 = await makeBundles(ck0, 0, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b0 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b0 });
 
 			const txA = makeFrame(new TextEncoder().encode('frame A — epoch 0'));
 			await encodeFrame(sender, txA);
 
-			const b1 = await bundlesFromMap(ck1, 1, PEER_MAP);
+			const b1 = await makeBundles(ck1, 1, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b1 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b1 });
 
@@ -101,7 +81,7 @@ describe('Scenario 3: ratchet forward + grace window', () => {
 			const ck0 = randomChainKey();
 			const ck1 = randomChainKey();
 
-			const b0 = await bundlesFromMap(ck0, 0, PEER_MAP);
+			const b0 = await makeBundles(ck0, 0, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b0 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b0 });
 
@@ -109,7 +89,7 @@ describe('Scenario 3: ratchet forward + grace window', () => {
 			const txA = makeFrame(new TextEncoder().encode('stale payload'));
 			await encodeFrame(sender, txA);
 
-			const b1 = await bundlesFromMap(ck1, 1, PEER_MAP);
+			const b1 = await makeBundles(ck1, 1, PEER_MAP);
 			await handleMessage(receiver, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b1 });
 
 			expect(receiver.currentMinValidEpoch).toBe(0);
@@ -135,11 +115,11 @@ describe('Scenario 3: ratchet forward + grace window', () => {
 			const ck0 = randomChainKey();
 			const ck1 = randomChainKey();
 
-			const b0 = await bundlesFromMap(ck0, 0, PEER_MAP);
+			const b0 = await makeBundles(ck0, 0, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b0 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b0 });
 
-			const b1 = await bundlesFromMap(ck1, 1, PEER_MAP);
+			const b1 = await makeBundles(ck1, 1, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b1 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b1 });
 
@@ -175,7 +155,7 @@ describe('Scenario 4: epoch invalidation', () => {
 			const ck0 = randomChainKey();
 			const ck1 = randomChainKey();
 
-			const b0 = await bundlesFromMap(ck0, 0, PEER_MAP);
+			const b0 = await makeBundles(ck0, 0, PEER_MAP);
 			await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b0 });
 			await handleMessage(receiver, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b0 });
 
@@ -183,7 +163,7 @@ describe('Scenario 4: epoch invalidation', () => {
 			await encodeFrame(sender, txE0);
 			const sealedE0 = new Uint8Array(txE0.data);
 
-			const b1 = await bundlesFromMap(ck1, 1, PEER_MAP);
+			const b1 = await makeBundles(ck1, 1, PEER_MAP);
 			await handleMessage(receiver, { type: 'epoch', epoch: 1, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b1 });
 
 			expect(receiver.currentMinValidEpoch).toBe(0);
@@ -205,7 +185,7 @@ describe('Scenario 4: epoch invalidation', () => {
 		try {
 			const receiver = createWorkerState((_m) => {});
 			for (const epoch of [0, 1, 2]) {
-				const b = await bundlesFromMap(randomChainKey(), epoch, PEER_MAP);
+				const b = await makeBundles(randomChainKey(), epoch, PEER_MAP);
 				await handleMessage(receiver, { type: 'epoch', epoch, peerIndexMap: PEER_MAP, selfPeerIndex: 1, keys: b });
 			}
 			expect(receiver.currentMinValidEpoch).toBe(0);
@@ -225,9 +205,9 @@ describe('Scenario 4: epoch invalidation', () => {
 			const ck0 = randomChainKey();
 			const ck1 = randomChainKey();
 			const ck2 = randomChainKey();
-			const b0 = await bundlesFromMap(ck0, 0, PEER_MAP);
-			const b1 = await bundlesFromMap(ck1, 1, PEER_MAP);
-			const b2 = await bundlesFromMap(ck2, 2, PEER_MAP);
+			const b0 = await makeBundles(ck0, 0, PEER_MAP);
+			const b1 = await makeBundles(ck1, 1, PEER_MAP);
+			const b2 = await makeBundles(ck2, 2, PEER_MAP);
 
 			// Encrypt one frame per epoch with a dedicated sender at that epoch
 			const sender0 = createWorkerState((_m) => {});
@@ -294,7 +274,7 @@ describe('Scenario 5: drainPreEpochQueue re-entrant drain guard', () => {
 		const receiver = createWorkerState((_m) => {});
 
 		const ck = randomChainKey();
-		const b = await bundlesFromMap(ck, 0, PEER_MAP);
+		const b = await makeBundles(ck, 0, PEER_MAP);
 		await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b });
 		installEpoch(receiver, 0, 1, b);
 
@@ -321,7 +301,7 @@ describe('Scenario 5: drainPreEpochQueue re-entrant drain guard', () => {
 		const receiver = createWorkerState((_m) => {});
 
 		const ck = randomChainKey();
-		const b = await bundlesFromMap(ck, 0, PEER_MAP);
+		const b = await makeBundles(ck, 0, PEER_MAP);
 		await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b });
 		installEpoch(receiver, 0, 1, b);
 
@@ -356,7 +336,7 @@ describe('Scenario 5: drainPreEpochQueue re-entrant drain guard', () => {
 		const receiver = createWorkerState((m) => emitted.push(m));
 
 		const ck = randomChainKey();
-		const b = await bundlesFromMap(ck, 0, PEER_MAP);
+		const b = await makeBundles(ck, 0, PEER_MAP);
 		await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b });
 		installEpoch(receiver, 0, 1, b);
 

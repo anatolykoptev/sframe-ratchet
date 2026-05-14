@@ -13,38 +13,15 @@
 import { describe, it, expect } from 'vitest';
 import { createWorkerState, installEpoch, handleMessage } from '../worker-state.ts';
 import { encodeFrame, decodeFrame } from '../worker-frame.ts';
-import { deriveSenderKeys, deriveNextSenderKey, randomChainKey, deriveEpochKeyTable } from '../ratchet-crypto.ts';
+import { deriveSenderKeys, deriveNextSenderKey, randomChainKey } from '../ratchet-crypto.ts';
 import { sframeEncrypt } from '../sframe.ts';
 import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
+import { makeFrame, makeBundle, makeBundles } from './helpers.ts';
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Build a PerSenderKeyBundle for a single sender at the INITIAL ratchet step.
- * rawKey is returned so callers can advance the sender-side key independently.
- */
-async function makeBundle(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndex: PeerIndex,
-): Promise<PerSenderKeyBundle & { rawKey: Uint8Array }> {
-	const k = await deriveSenderKeys(chainKey, epoch, peerIndex);
-	return { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey };
-}
-
-async function makeBundles(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndexMap: Record<string, PeerIndex>,
-): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
-	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
-	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
-	return out;
-}
 
 /**
  * Advance exactly `steps` times from the given raw key and return the key AT step `steps`.
@@ -71,11 +48,6 @@ async function advanceSenderKeyFrom(
 	return last;
 }
 
-function makeFrame(body: Uint8Array): RTCEncodedVideoFrame {
-	const buf = new ArrayBuffer(body.byteLength);
-	new Uint8Array(buf).set(body);
-	return { data: buf } as unknown as RTCEncodedVideoFrame;
-}
 
 function collectErrors(state: ReturnType<typeof createWorkerState>): OutMsg[] {
 	const collected: OutMsg[] = [];

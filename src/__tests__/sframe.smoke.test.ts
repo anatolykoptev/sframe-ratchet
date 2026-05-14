@@ -12,6 +12,7 @@ import { decodeFrame, encodeFrame } from '../worker-frame.ts';
 import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
 import { StaleEpochError } from '../errors.ts';
+import { makeFrame } from './helpers.ts';
 
 // --- existing smoke tests, updated for the new API ------------------------
 
@@ -325,13 +326,3 @@ async function bundlesFromMap(
 	return out;
 }
 
-/**
- * Minimal RTCEncodedVideoFrame stand-in: `data` is a mutable ArrayBuffer,
- * which is the only surface encodeFrame / decodeFrame touch. Cast through
- * `unknown` because the full DOM type has many more fields we don't need.
- */
-function makeFrame(body: Uint8Array): RTCEncodedVideoFrame {
-	const buf = new ArrayBuffer(body.byteLength);
-	new Uint8Array(buf).set(body);
-	return { data: buf } as unknown as RTCEncodedVideoFrame;
-}

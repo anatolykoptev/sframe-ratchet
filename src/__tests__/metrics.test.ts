@@ -21,38 +21,14 @@ import { createWorkerState, installEpoch, handleMessage } from '../worker-state.
 import { encodeFrame, decodeFrame, drainPreEpochQueue } from '../worker-frame.ts';
 import {
 	deriveSenderKeys,
-	deriveEpochKeyTable,
 	randomChainKey,
 	deriveNextSenderKey,
 } from '../ratchet-crypto.ts';
 import { sframeEncrypt } from '../sframe.ts';
-import type { MetricsEvent, OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
+import type { MetricsEvent, OutMsg } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
 import { PRE_EPOCH_QUEUE_CAP } from '../worker-types.ts';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function makeBundle(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndex: PeerIndex,
-): Promise<PerSenderKeyBundle> {
-	const k = await deriveSenderKeys(chainKey, epoch, peerIndex);
-	return { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey };
-}
-
-async function makeBundles(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndexMap: Record<string, PeerIndex>,
-): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
-	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
-	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
-	return out;
-}
+import { makeBundles } from './helpers.ts';
 
 function makeEncryptedFrame(body: Uint8Array): RTCEncodedVideoFrame {
 	const buf = new ArrayBuffer(body.byteLength);

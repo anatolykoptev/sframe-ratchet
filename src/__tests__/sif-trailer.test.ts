@@ -7,38 +7,11 @@ import { describe, it, expect } from 'vitest';
 import { DEFAULT_SIF_TRAILER, getDefaultSifTrailer } from '../sif-trailer.ts';
 import { createWorkerState, handleMessage, installEpoch } from '../worker-state.ts';
 import { encodeFrame, decodeFrame } from '../worker-frame.ts';
-import { deriveSenderKeys, randomChainKey, deriveEpochKeyTable } from '../ratchet-crypto.ts';
+import { randomChainKey } from '../ratchet-crypto.ts';
 import { sframeEncrypt } from '../sframe.ts';
-import type { OutMsg, PerSenderKeyBundle } from '../worker-types.ts';
+import type { OutMsg } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
-
-// --- helpers -----------------------------------------------------------------
-
-async function makeBundle(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndex: PeerIndex,
-): Promise<PerSenderKeyBundle> {
-	const k = await deriveSenderKeys(chainKey, epoch, peerIndex);
-	return { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey };
-}
-
-async function makeBundles(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndexMap: Record<string, PeerIndex>,
-): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
-	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
-	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
-	return out;
-}
-
-function makeFrame(body: Uint8Array): RTCEncodedVideoFrame {
-	const buf = new ArrayBuffer(body.byteLength);
-	new Uint8Array(buf).set(body);
-	return { data: buf } as unknown as RTCEncodedVideoFrame;
-}
+import { makeFrame, makeBundle, makeBundles } from './helpers.ts';
 
 // --- DEFAULT_SIF_TRAILER / getDefaultSifTrailer ---------------------------
 

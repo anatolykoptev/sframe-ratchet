@@ -7,27 +7,13 @@ import { describe, it, expect } from 'vitest';
 import { getUnencryptedBytes } from '../codec-partial.ts';
 import { createWorkerState } from '../worker-state.ts';
 import { encodeFrame, decodeFrame } from '../worker-frame.ts';
-import { deriveEpochKeyTable, randomChainKey } from '../ratchet-crypto.ts';
+import { randomChainKey } from '../ratchet-crypto.ts';
 import { sframeEncrypt, sframeDecrypt } from '../sframe.ts';
 import { parseHeader } from '../sframe-header.ts';
-import type { Codec, FrameKind, PerSenderKeyBundle } from '../worker-types.ts';
+import type { Codec, FrameKind } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
 import { installEpoch } from '../worker-state.ts';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function makeBundles(
-	chainKey: Uint8Array,
-	epoch: number,
-	peerIndexMap: Record<string, PeerIndex>,
-): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
-	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
-	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
-	return out;
-}
+import { makeBundles } from './helpers.ts';
 
 function makeVideoFrame(body: Uint8Array, type: 'key' | 'delta' = 'key'): RTCEncodedVideoFrame {
 	const buf = new ArrayBuffer(body.byteLength);
