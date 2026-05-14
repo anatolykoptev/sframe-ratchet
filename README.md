@@ -43,6 +43,47 @@ npm install sframe-ratchet @noble/curves @noble/hashes
 
 ## Quick start
 
+### Hello world with SimpleKex (NOT for production)
+
+> **⚠ SimpleKex is for demos and local development only.** It has no forward secrecy, no membership consensus, and no revocation. See `src/kex-simple.ts` and the class-level JSDoc for the full warning. For production, see "Production: bring your own KEX" below.
+
+```ts
+import { SimpleKex } from 'sframe-ratchet/kex-simple';
+import { deriveSenderKeys, sframeEncrypt, sframeDecrypt } from 'sframe-ratchet';
+
+// Both peers share the same password and salt (set a random per-room salt in real use).
+const kexAlice = new SimpleKex({ sharedSecret: 'demo-password' });
+const kexBob   = new SimpleKex({ sharedSecret: 'demo-password' });
+
+// Derive epoch 0 chain key — identical on both sides from the same password.
+const ckAlice = await kexAlice.initialEpoch();
+const ckBob   = await kexBob.initialEpoch();
+
+// Each peer derives its own sending key from the shared chain key.
+const aliceKey = await deriveSenderKeys(ckAlice, /* epoch */ 0, /* peerIndex */ 0);
+const aliceKeyBob = await deriveSenderKeys(ckBob, /* epoch */ 0, /* peerIndex */ 0);
+
+// Alice encrypts; Bob decrypts using his copy of the same key.
+const sealed = await sframeEncrypt(new TextEncoder().encode('hello!'), aliceKey, 0n);
+const opened = await sframeDecrypt(sealed, ({ peerIndex }) => peerIndex === 0 ? aliceKeyBob : null);
+console.log(new TextDecoder().decode(opened)); // 'hello!'
+
+// Rotate to epoch 1 (e.g. on membership change).
+const ck1Alice = kexAlice.rotateEpoch(ckAlice, 1);
+```
+
+### Production: bring your own KEX
+
+For production, replace `SimpleKex` with a real key-agreement protocol. The library is KEX-agnostic — any mechanism that produces a shared 32-byte `ChainKey` per epoch integrates with `deriveSenderKeys`:
+
+- **MLS**: use `@signalapp/libsignal-client` or `mls-rs` to negotiate epoch keys; extract 32 bytes via your exporter and pass them as the `chainKey` argument.
+- **X3DH**: perform the handshake off-band, derive a shared secret, and feed it through `HKDF` to your `chainKey`.
+- **Custom ECDH**: wrap your DH output in `HKDF-SHA-256` to produce 32 uniform bytes.
+
+The `EpochAnnouncement` / `RoomRatchet` API in this library handles the per-epoch key-table bookkeeping once you supply the chain key material.
+
+### Low-level path
+
 The lowest-level path: derive per-sender keys from a shared chain key, then encrypt and decrypt a single frame.
 
 ```ts

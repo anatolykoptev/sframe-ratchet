@@ -25,6 +25,10 @@
     "./worker": {
       "import": "./dist/worker.js",
       "types": "./dist/worker.d.ts"
+    },
+    "./kex-simple": {
+      "import": "./dist/kex-simple.js",
+      "types": "./dist/kex-simple.d.ts"
     }
   },
   "files": [
