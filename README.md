@@ -197,6 +197,26 @@ new Worker(new URL('sframe-ratchet/worker', import.meta.url), { type: 'module' }
 - **Framework bindings.** No React/Svelte/Vue wrappers.
 - **Identity, authorization, group membership consensus.** The ratchet trusts whatever member list you give it.
 
+## Observability
+
+The worker can emit structured telemetry events to the main thread. Subscribe with `onMetrics`:
+
+```ts
+import { onMetrics } from 'sframe-ratchet';
+
+worker.postMessage({ type: 'set-metrics-enabled', enabled: true });
+
+const off = onMetrics(worker, (ev) => {
+  // ev.kind: 'encrypt' | 'decrypt' | 'decrypt_fail' | 'ratchet_retry' | 'queue_drop' | 'epoch_advance'
+  console.log(ev);
+});
+
+// Unsubscribe:
+off();
+```
+
+Event kinds: `encrypt`, `decrypt`, `decrypt_fail` (carries error `code`), `ratchet_retry` (succeeded/failed), `queue_drop` (`pre_epoch_full` or `stale_epoch`), `epoch_advance`. All handlers are wrapped in `try/catch` — a buggy handler never breaks other listeners. See [ARCHITECTURE.md](./docs/ARCHITECTURE.md#observability) for a full Prometheus-style integration sketch.
+
 ## Status
 
 [0.1.0](./CHANGELOG.md) — extracted from a production product and pared down to the parts that are independently useful. Test suite is 38/38 green. API may change before 1.0.

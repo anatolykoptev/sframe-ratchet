@@ -79,3 +79,43 @@ export type { Codec, FrameKind } from './worker-types.js';
 // ---- SIF trailer (mixed-room support) ------------------------------------
 export { DEFAULT_SIF_TRAILER, getDefaultSifTrailer } from './sif-trailer.js';
 export type { SetSifTrailerMsg } from './worker-types.js';
+
+// ---- Telemetry / observability --------------------------------------------
+export type { MetricsEvent } from './worker-types.js';
+
+/**
+ * Subscribe to telemetry events posted by the sframe worker.
+ *
+ * The worker must have `set-metrics-enabled` sent with `enabled: true` before
+ * events are emitted. This helper adds a `message` listener on `worker` and
+ * filters for `data.type === 'metrics'`. It wraps the user handler in a
+ * try/catch so a buggy handler cannot suppress subsequent events.
+ *
+ * @returns An unsubscribe function. Call it to remove the listener.
+ *
+ * @example
+ * ```ts
+ * worker.postMessage({ type: 'set-metrics-enabled', enabled: true });
+ * const off = onMetrics(worker, (ev) => {
+ *   if (ev.kind === 'encrypt') encryptCounter++;
+ * });
+ * // later:
+ * off();
+ * ```
+ */
+export function onMetrics(
+	worker: { addEventListener(type: 'message', listener: (ev: MessageEvent) => void): void;
+	          removeEventListener(type: 'message', listener: (ev: MessageEvent) => void): void },
+	handler: (ev: import('./worker-types.js').MetricsEvent) => void,
+): () => void {
+	const listener = (ev: MessageEvent): void => {
+		if (ev.data?.type !== 'metrics') return;
+		try {
+			handler(ev.data.event as import('./worker-types.js').MetricsEvent);
+		} catch {
+			// Swallow — a buggy handler must not break subsequent listeners.
+		}
+	};
+	worker.addEventListener('message', listener);
+	return () => worker.removeEventListener('message', listener);
+}

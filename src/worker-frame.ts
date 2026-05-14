@@ -18,6 +18,7 @@ import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
 import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, StaleEpochError } from './errors.ts';
+import { emitMetric } from './metrics.ts';
 
 export function pipe(
 	state: WorkerState,
@@ -107,6 +108,13 @@ export async function encodeFrame(
 	wire.set(sealed, N);
 	if (trailer) wire.set(trailer, N + sealed.byteLength);
 	frame.data = toExclusiveArrayBuffer(wire);
+	emitMetric(state, {
+		kind: 'encrypt',
+		epoch: key.epoch,
+		peerIndex: key.peerIndex,
+		bytes: plaintext.byteLength,
+		codec: state.codec,
+	});
 }
 
 /** Returns true iff `buf` ends with `suffix`. */
@@ -188,6 +196,7 @@ async function tryDecryptWithRatchet(
 			// this step hit immediately without re-deriving.
 			entry.keys.set(peerIndex, next);
 			entry.ratchetSteps.set(peerIndex, (entry.ratchetSteps.get(peerIndex) ?? 0) + step);
+			emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: step, succeeded: true });
 			return plaintext;
 		} catch {
 			// This step failed; advance and try next.
@@ -196,6 +205,7 @@ async function tryDecryptWithRatchet(
 	}
 
 	// Window exhausted — wrap in a typed error so callers can branch on it.
+	emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: state.ratchetWindowSize, succeeded: false });
 	throw new RatchetWindowExhaustedError(
 		`sframe: ratchet window exhausted (${state.ratchetWindowSize} steps) for epoch=${epoch} peer=${peerIndex}`,
 		{ epoch, peerIndex, attempts: state.ratchetWindowSize },
@@ -252,6 +262,7 @@ export async function decodeFrame(
 				type: 'decrypt_failure', reason: 'stale_epoch',
 				kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
 			});
+			emitMetric(state, { kind: 'queue_drop', reason: 'stale_epoch', epoch });
 			throw new StaleEpochError(
 				`sframe: stale epoch ${epoch} (min valid: ${state.currentMinValidEpoch})`,
 				{ frameEpoch: epoch, minValidEpoch: state.currentMinValidEpoch, kid: hdr.kid },
@@ -281,10 +292,18 @@ export async function decodeFrame(
 		plaintext.set(prefix, 0);
 		plaintext.set(opened, N);
 		frame.data = toExclusiveArrayBuffer(plaintext);
+		emitMetric(state, { kind: 'decrypt', epoch, peerIndex, bytes: plaintext.byteLength });
 	} catch (err) {
 		// StaleEpochError already emitted its decrypt_failure event above.
 		if (!(err instanceof StaleEpochError)) {
 			const detail = err instanceof Error ? err.message : String(err);
+			const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
+			emitMetric(state, {
+				kind: 'decrypt_fail',
+				code: errCode,
+				epoch: hdrEpoch >= 0 ? hdrEpoch : undefined,
+				peerIndex: hdrPeerIndex >= 0 ? hdrPeerIndex : undefined,
+			});
 			state.emit({
 				type: 'decrypt_failure', reason: 'decrypt_failed',
 				kid: hdrKid >= 0 ? hdrKid : undefined,
@@ -292,6 +311,14 @@ export async function decodeFrame(
 				peerIndex: hdrPeerIndex >= 0 ? hdrPeerIndex : undefined,
 				ctr: hdrCtr,
 				detail,
+			});
+		} else {
+			// StaleEpochError: emit metrics event too
+			emitMetric(state, {
+				kind: 'decrypt_fail',
+				code: (err as { code: string }).code,
+				epoch: hdrEpoch >= 0 ? hdrEpoch : undefined,
+				peerIndex: hdrPeerIndex >= 0 ? hdrPeerIndex : undefined,
 			});
 		}
 		throw err;
@@ -312,6 +339,7 @@ function pushToQueue(
 		// Drop oldest (FIFO ring — shift the front).
 		state.preEpochQueue.shift();
 		state.emit({ type: 'decrypt_failure', reason: 'queue_overflow' });
+		emitMetric(state, { kind: 'queue_drop', reason: 'pre_epoch_full' });
 	}
 	state.preEpochQueue.push({ frame });
 }

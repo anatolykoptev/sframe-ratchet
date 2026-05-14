@@ -8,6 +8,7 @@
 import { makeKid } from './ratchet-ids.ts';
 import type { PeerIndex, SFrameKey } from './types.ts';
 import { drainPreEpochQueue, pipe } from './worker-frame.ts';
+import { emitMetric } from './metrics.ts';
 import {
 	GRACE_WINDOW_MS,
 	type InMsg,
@@ -32,6 +33,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		codec: undefined,
 		sifTrailer: undefined,
 		ratchetWindowSize: 8,
+		metricsEnabled: false,
 	};
 }
 
@@ -63,6 +65,9 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 		case 'set-ratchet-window':
 			state.ratchetWindowSize = Math.max(0, Math.floor(msg.size));
 			return;
+		case 'set-metrics-enabled':
+			state.metricsEnabled = msg.enabled;
+			return;
 		case 'teardown':
 			teardown(state);
 			return;
@@ -86,6 +91,7 @@ export function installEpoch(
 	}
 	state.epochs.set(epoch, { epoch, selfPeerIndex, keys, ratchetSteps: new Map() });
 	if (epoch > state.currentEpoch) {
+		const prevEpoch = state.currentEpoch;
 		state.currentEpoch = epoch;
 		state.selfPeerIndex = selfPeerIndex;
 		state.ctr = 0n; // single sender-wide CTR, fresh per epoch (spec §2 L42)
@@ -94,6 +100,11 @@ export function installEpoch(
 		// M3.3 key-distribution protocol), so the stale-epoch gate at
 		// decodeFrame() is reachable on the receiver path.
 		scheduleWipeOfEpochsBelow(state, epoch);
+		// Telemetry: epoch_advance. Only fires when a genuinely new epoch is
+		// installed (prevEpoch >= 0 means at least one epoch was already active).
+		if (prevEpoch >= 0) {
+			emitMetric(state, { kind: 'epoch_advance', from: prevEpoch, to: epoch });
+		}
 	}
 }
 

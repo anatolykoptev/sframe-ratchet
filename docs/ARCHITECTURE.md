@@ -177,3 +177,56 @@ if (err instanceof StaleEpochError) {
 | `QueueFullError` | `QUEUE_FULL` | Pre-epoch ring buffer overflow (oldest frame dropped; this error is available for programmatic detection). |
 
 Programmer-mistake / invariant violations (e.g. calling `startNewEpoch` on a non-author without a `viaChainKey`) remain as generic `Error` or `TypeError`.
+
+## Observability
+
+The worker emits structured telemetry over `postMessage` when metrics are enabled. Consumers subscribe on the main thread via `onMetrics`:
+
+```ts
+import { onMetrics } from 'sframe-ratchet';
+
+// Enable emission (off by default — zero cost on hot path).
+worker.postMessage({ type: 'set-metrics-enabled', enabled: true });
+
+const off = onMetrics(worker, (ev) => {
+  switch (ev.kind) {
+    case 'encrypt':   encryptCounter++;  break;
+    case 'decrypt':   decryptCounter++;  break;
+    case 'decrypt_fail': failCounter++;  break;
+    case 'ratchet_retry': retryCounter++; break;
+    case 'queue_drop': dropCounter++;    break;
+    case 'epoch_advance': /* log */      break;
+  }
+});
+
+// Stop listening:
+off();
+```
+
+### Event kinds
+
+| Kind | Payload fields | Fired when |
+|------|---------------|------------|
+| `encrypt` | `epoch`, `peerIndex`, `bytes`, `codec?` | Successful `encodeFrame` |
+| `decrypt` | `epoch`, `peerIndex`, `bytes` | Successful `decodeFrame` |
+| `decrypt_fail` | `code`, `epoch?`, `peerIndex?` | AEAD failure, stale epoch, or window exhaustion |
+| `ratchet_retry` | `epoch`, `peerIndex`, `steps`, `succeeded` | Within-epoch ratchet retry attempted |
+| `queue_drop` | `reason` (`pre_epoch_full` \| `stale_epoch`), `epoch?` | Frame silently dropped |
+| `epoch_advance` | `from`, `to` | `currentEpoch` promoted to a higher epoch |
+
+### Wire format
+
+Each event is posted as `{ type: 'metrics'; event: MetricsEvent }`. The `onMetrics` helper filters on `data.type === 'metrics'` and wraps the user handler in a `try/catch` so a buggy handler cannot break subsequent listeners.
+
+### Prometheus-style integration sketch
+
+```ts
+const counters = { encrypt: 0, decrypt: 0, decrypt_fail: 0, ratchet_retry: 0, queue_drop: 0 };
+
+onMetrics(worker, (ev) => {
+  if (ev.kind in counters) counters[ev.kind as keyof typeof counters]++;
+});
+
+// Expose via a /metrics endpoint:
+// sframe_encrypt_total, sframe_decrypt_total, sframe_decrypt_fail_total, …
+```

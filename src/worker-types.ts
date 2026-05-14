@@ -67,11 +67,25 @@ export interface StreamsMsg {
 	/** Optional per-track codec; drives codec-aware partial encryption prefix. */
 	codec?: Codec;
 }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg;
+export interface SetMetricsEnabledMsg { type: 'set-metrics-enabled'; enabled: boolean }
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg;
+
+/**
+ * Structured telemetry event posted from the worker to the main thread when
+ * metrics are enabled. Consumers register via `onMetrics(worker, handler)`.
+ */
+export type MetricsEvent =
+	| { kind: 'encrypt'; epoch: number; peerIndex: number; bytes: number; codec?: Codec }
+	| { kind: 'decrypt'; epoch: number; peerIndex: number; bytes: number }
+	| { kind: 'decrypt_fail'; code: string; epoch?: number; peerIndex?: number }
+	| { kind: 'ratchet_retry'; epoch: number; peerIndex: number; steps: number; succeeded: boolean }
+	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch'; epoch?: number }
+	| { kind: 'epoch_advance'; from: number; to: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
 	| { type: 'ready' }
+	| { type: 'metrics'; event: MetricsEvent }
 	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch';
 		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string };
 
@@ -133,6 +147,12 @@ export interface WorkerState {
 	 * The trailer is NOT inside AES-GCM AAD — it is a routing hint only.
 	 */
 	sifTrailer?: Uint8Array;
+	/**
+	 * When true, the worker posts `{ type: 'metrics'; event: MetricsEvent }` messages
+	 * after each encrypt, decrypt, ratchet-retry, queue-drop, and epoch-advance.
+	 * Disabled by default to keep the hot path zero-cost.
+	 */
+	metricsEnabled: boolean;
 }
 
 export const GRACE_WINDOW_MS = 2000;
