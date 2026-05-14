@@ -31,6 +31,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		emit,
 		codec: undefined,
 		sifTrailer: undefined,
+		ratchetWindowSize: 8,
 	};
 }
 
@@ -59,6 +60,9 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 		case 'set-sif-trailer':
 			state.sifTrailer = msg.trailer ?? undefined;
 			return;
+		case 'set-ratchet-window':
+			state.ratchetWindowSize = Math.max(0, Math.floor(msg.size));
+			return;
 		case 'teardown':
 			teardown(state);
 			return;
@@ -71,15 +75,16 @@ export function installEpoch(
 	selfPeerIndex: PeerIndex,
 	bundles: Map<PeerIndex, PerSenderKeyBundle>,
 ): void {
-	const keys = new Map<PeerIndex, SFrameKey>();
+	const keys = new Map<PeerIndex, SFrameKey & { rawKey: Uint8Array }>();
 	for (const [pi, bundle] of bundles) {
 		keys.set(pi, {
 			kid: makeKid(epoch, pi),
 			epoch, peerIndex: pi,
 			cryptoKey: bundle.cryptoKey, salt: bundle.salt,
+			rawKey: bundle.rawKey,
 		});
 	}
-	state.epochs.set(epoch, { epoch, selfPeerIndex, keys });
+	state.epochs.set(epoch, { epoch, selfPeerIndex, keys, ratchetSteps: new Map() });
 	if (epoch > state.currentEpoch) {
 		state.currentEpoch = epoch;
 		state.selfPeerIndex = selfPeerIndex;

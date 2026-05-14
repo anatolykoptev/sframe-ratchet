@@ -66,12 +66,16 @@ wire frame from RTCRtpReceiver
    │    4. stale-epoch gate:                              │
    │         if epoch < currentMinValidEpoch              │
    │         emit decrypt_failure{stale_epoch}; drop      │
-   │    5. resolveKey({ kid, epoch, peerIndex })          │
-   │         null → emit key_not_found; drop              │
-   │    6. iv = salt XOR be96(ctr)                        │
-   │    7. AES-GCM decrypt buf; AAD = header bytes        │
-   │    8. reassemble: [prefix][plaintext]                │
-   │    9. replace frame.data with reassembled bytes      │
+   │    5. tryDecryptWithRatchet(state, buf, epoch, pi)   │
+   │         a. try cached key (step 0, or last advanced) │
+   │         b. on AEAD fail: derive step 1 via HKDF,    │
+   │            try; derive step 2; … up to              │
+   │            ratchetWindowSize (default 8)             │
+   │         c. on success at step N: advance cached key  │
+   │            so next frame at step N hits immediately  │
+   │         d. on exhaustion: surface original error     │
+   │    6. reassemble: [prefix][plaintext]                │
+   │    7. replace frame.data with reassembled bytes      │
    └──────────────────────────────────────────────────────┘
         │
         ▼
@@ -90,6 +94,8 @@ Three queueing subtleties live inside the worker state machine:
 - **Per-frame try/catch.** Frames are processed in a loop; an exception on frame N (e.g. `parseHeader` throwing on a corrupt header) must not abort the loop for frames N+1, N+2, etc. Each frame is wrapped individually.
 
 These three behaviors are covered by tests in `src/__tests__/sframe.smoke.test.ts`.
+
+**Within-epoch ratchet retry window** (`ratchetWindowSize`, default 8): When a sender advances their per-sender key (a forward-secrecy step within an epoch) and in-flight frames encrypted with the OLD key arrive after the receiver expects the new one, AEAD fails. The retry window derives the next step via `deriveNextSenderKey(rawKey, salt, epoch, peerIndex)` — a HKDF-Expand from the current raw key bytes — and retries up to `ratchetWindowSize` times. On success at step N the cached key is advanced so subsequent frames at that step decrypt immediately. On exhaustion the original error is surfaced. Controlled at runtime via the `set-ratchet-window` message. The drain loop (`drainPreEpochQueue`) applies the same retry logic for consistency.
 
 ## Main / worker split
 

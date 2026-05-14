@@ -23,8 +23,8 @@ Lets SFUs route by frame type without seeing payload; gives browser decoders "gr
 ### ~~SIF trailer for mixed-room support~~ — DONE
 Optional fixed suffix on ciphertext that lets a receiver detect "this frame is SFrame-encrypted" before attempting decrypt. Solves the mixed-room case where some peers run E2EE and some do not. Wire-format change — gated behind `sifTrailer` field (default `undefined` = disabled). Pattern from LiveKit. Shipped in `src/sif-trailer.ts`; control message `set-sif-trailer`; 14 tests.
 
-### Ratchet retry window on decode — M
-On `decrypt_failed` for a known epoch, try ratcheting the key forward up to `ratchetWindowSize` steps (default 8) before giving up. Smooths over RTP/epoch desync during rotation. Distinct from our existing `preEpochQueue` (which handles "no epoch yet") and from epoch rotation itself. Pattern from LiveKit `ParticipantKeyHandler`.
+### ~~Ratchet retry window on decode~~ — DONE
+On `decrypt_failed` for a known epoch, try ratcheting the key forward up to `ratchetWindowSize` steps (default 8) before giving up. Smooths over RTP/epoch desync during rotation. Distinct from our existing `preEpochQueue` (which handles "no epoch yet") and from epoch rotation itself. Pattern from LiveKit `ParticipantKeyHandler`. Shipped in `src/worker-frame.ts` (`tryDecryptWithRatchet`); control message `set-ratchet-window`; 8 tests in `src/__tests__/ratchet-window.test.ts`.
 
 ## Medium-term
 

@@ -19,7 +19,17 @@ export type Codec = 'vp8' | 'vp9' | 'h264' | 'av1' | 'opus';
  */
 export type FrameKind = 'key' | 'inter';
 
-export interface PerSenderKeyBundle { cryptoKey: CryptoKey; salt: Uint8Array }
+export interface PerSenderKeyBundle {
+	cryptoKey: CryptoKey;
+	salt: Uint8Array;
+	/**
+	 * Raw 32-byte AES-GCM key material. Required for the within-epoch ratchet
+	 * retry window: `deriveNextSenderKey` in ratchet-crypto.ts chains from these
+	 * raw bytes. Kept alongside the non-extractable CryptoKey handle because
+	 * WebCrypto does not allow round-tripping a non-extractable key back to bytes.
+	 */
+	rawKey: Uint8Array;
+}
 
 export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex }
 export interface EpochMsg {
@@ -42,6 +52,14 @@ export interface SetSifTrailerMsg {
 	/** `null` disables the trailer; any `Uint8Array` enables it with that byte sequence. */
 	trailer: Uint8Array | null;
 }
+export interface SetRatchetWindowMsg {
+	type: 'set-ratchet-window';
+	/**
+	 * Number of forward ratchet steps to attempt on AEAD failure for a known
+	 * epoch + peer. 0 disables the feature entirely (any mismatch fails immediately).
+	 */
+	size: number;
+}
 export interface StreamsMsg {
 	type: 'streams'; side: Side;
 	readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
@@ -49,7 +67,7 @@ export interface StreamsMsg {
 	/** Optional per-track codec; drives codec-aware partial encryption prefix. */
 	codec?: Codec;
 }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | StreamsMsg;
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg;
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
@@ -68,7 +86,15 @@ export const PRE_EPOCH_QUEUE_CAP = 50;
 export interface EpochEntry {
 	epoch: number;
 	selfPeerIndex: PeerIndex;
-	keys: Map<PeerIndex, SFrameKey>;
+	keys: Map<PeerIndex, SFrameKey & { rawKey: Uint8Array }>;
+	/**
+	 * Per-sender ratchet step cursor. `ratchetSteps.get(peerIndex)` is the highest
+	 * step index whose key is currently cached in `keys`. Starts at 0 (the key
+	 * derived at installEpoch time). Advanced forward-only when the retry window
+	 * finds a matching step — subsequent frames at the same step decrypt immediately.
+	 * Cleaned up automatically when the EpochEntry is deleted by wipeEpoch().
+	 */
+	ratchetSteps: Map<PeerIndex, number>;
 }
 
 export interface WorkerState {
@@ -87,6 +113,18 @@ export interface WorkerState {
 	emit: (msg: OutMsg) => void;
 	/** Per-track codec; drives codec-aware partial encryption.  Undefined = full encrypt. */
 	codec?: Codec;
+	/**
+	 * Number of forward ratchet steps to attempt per-sender on AEAD failure for
+	 * a known epoch + known peer. Default 8. Set to 0 to disable the feature
+	 * (any AEAD failure is surfaced immediately with no retry).
+	 *
+	 * This is a liveness feature: it lets a receiver catch up when the sender
+	 * has advanced its per-sender key by fewer steps than the window size — a
+	 * scenario that occurs naturally when in-flight frames arrive out of order
+	 * relative to the sender's key advancement. See docs/SECURITY.md for why
+	 * this does NOT widen attacker decryptability.
+	 */
+	ratchetWindowSize: number;
 	/**
 	 * Optional SIF (Secure Interoperable Frame) trailer bytes.
 	 * When set, the encoder appends these bytes after the SFrame ciphertext, and the

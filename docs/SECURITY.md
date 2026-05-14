@@ -43,6 +43,8 @@ The adversary cannot:
 
   If you need per-frame authentication of the routing marker, include a MAC or HMAC over the trailer (keyed with a shared secret agreed out-of-band) before sending to this library as a custom trailer byte sequence — but note that this is outside the scope of `sframe-ratchet`.
 
+- **Ratchet retry window (liveness feature, NOT a security feature).** The decode pipeline attempts up to `ratchetWindowSize` forward derivation steps on AEAD failure for a known epoch + known peer. This smooths over RTP delivery jitter when the sender has advanced their per-sender key slightly ahead of what the receiver has cached. It does **not** widen the attacker's ability to decrypt: every retried key is still derived from the same HKDF chain that originates in the shared ChainKey, which the attacker does not have. An attacker cannot produce a valid ciphertext for any step in the chain without the ChainKey, regardless of window size. The retry window is bounded to prevent unbounded computation (default 8 steps; set to 0 to disable entirely via `set-ratchet-window`). Frames from a completely different epoch, or with an unknown peer index, still fail immediately without consuming retry budget.
+
 ## Key handling guarantees
 
 - **Chain keys are derived on the main thread** and held there for the lifetime of an epoch. They are never serialized over `postMessage` as raw bytes. The `FrameCryptor.setEpoch` API takes a chain key on main, derives the per-sender key table locally, and posts only the resulting `CryptoKey` handles to the worker.

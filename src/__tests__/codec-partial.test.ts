@@ -25,7 +25,7 @@ async function makeBundles(
 ): Promise<Map<PeerIndex, PerSenderKeyBundle>> {
 	const table = await deriveEpochKeyTable(chainKey, epoch, peerIndexMap);
 	const out = new Map<PeerIndex, PerSenderKeyBundle>();
-	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt });
+	for (const [pi, k] of table) out.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
 	return out;
 }
 

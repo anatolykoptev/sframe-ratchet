@@ -12,9 +12,11 @@
 import { parseHeader } from './sframe-header.ts';
 import { sframeDecrypt, sframeEncrypt } from './sframe.ts';
 import { splitKid } from './ratchet-ids.ts';
+import { deriveNextSenderKey } from './ratchet-crypto.ts';
 import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
+import type { PeerIndex } from './types.ts';
 
 export function pipe(
 	state: WorkerState,
@@ -116,6 +118,82 @@ function endsWith(buf: Uint8Array, suffix: Uint8Array): boolean {
 	return true;
 }
 
+/**
+ * Attempt to decrypt `buf` (full SFrame: header+ciphertext+tag) using the
+ * known key for (epoch, peerIndex), then — on AEAD failure — try forward
+ * ratchet steps up to `state.ratchetWindowSize`.
+ *
+ * Returns the decrypted plaintext on success. On success at step N > 0 the
+ * per-sender cached key is advanced to step N so subsequent frames at the same
+ * step decrypt on the first try without a retry loop.
+ *
+ * Throws the ORIGINAL decrypt error after exhausting the window, so the caller
+ * can surface it (no silent drop). Also throws immediately when:
+ *   - The epoch is unknown (no EpochEntry found).
+ *   - The peer is unknown within the epoch (no initial key found).
+ *   - ratchetWindowSize === 0 (retry disabled; exactly 1 AEAD attempt is made).
+ *
+ * IMPORTANT: this function does NOT cross epoch boundaries. A frame carrying a
+ * different epoch KID is rejected by the normal sframeDecrypt resolver path
+ * (key not found) and the error propagates up without consuming retry budget.
+ *
+ * Forward-only cursor note: if a sender skips ahead M steps and then a frame
+ * from BEFORE the advance arrives, the cached step is already M. The retry loop
+ * tries steps M+1 .. M+window — none match the older frame. The older frame
+ * fails. This is expected and correct: the retry window smooths RTP reorder
+ * jitter around a single key advance; it does not reconstruct past keys.
+ */
+async function tryDecryptWithRatchet(
+	state: WorkerState,
+	buf: Uint8Array,
+	epoch: number,
+	peerIndex: PeerIndex,
+): Promise<Uint8Array> {
+	const entry = state.epochs.get(epoch);
+	if (!entry) throw new Error(`sframe: no epoch entry for epoch=${epoch}`);
+	const key = entry.keys.get(peerIndex);
+	if (!key) throw new Error(`sframe: key not found for epoch=${epoch} peer=${peerIndex}`);
+
+	// Step 0 — try the currently cached key.
+	let firstError: unknown;
+	try {
+		return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+			const ep = state.epochs.get(e);
+			return ep?.keys.get(pi) ?? null;
+		});
+	} catch (err) {
+		firstError = err;
+	}
+
+	// If the window is disabled, surface the original failure immediately.
+	if (state.ratchetWindowSize === 0) throw firstError;
+
+	// Steps 1..ratchetWindowSize — forward ratchet.
+	let currentRaw = key.rawKey;
+	const salt = key.salt;
+	for (let step = 1; step <= state.ratchetWindowSize; step++) {
+		const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex);
+		try {
+			const plaintext = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+				if (e === epoch && pi === peerIndex) return next;
+				const ep = state.epochs.get(e);
+				return ep?.keys.get(pi) ?? null;
+			});
+			// Success at step N: advance the cached key so subsequent frames at
+			// this step hit immediately without re-deriving.
+			entry.keys.set(peerIndex, next);
+			entry.ratchetSteps.set(peerIndex, (entry.ratchetSteps.get(peerIndex) ?? 0) + step);
+			return plaintext;
+		} catch {
+			// This step failed; advance and try next.
+			currentRaw = next.rawKey;
+		}
+	}
+
+	// Window exhausted — surface the original failure.
+	throw firstError;
+}
+
 export async function decodeFrame(
 	state: WorkerState,
 	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
@@ -184,10 +262,8 @@ export async function decodeFrame(
 			enqueuePreEpoch(state, frame);
 			return; // not an error from caller's perspective
 		}
-		const opened = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
-			const entry = state.epochs.get(e);
-			return entry?.keys.get(pi) ?? null;
-		});
+
+		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 
 		// Reassemble: [unencrypted prefix] [decrypted plaintext]
 		const plaintext = new Uint8Array(N + opened.byteLength);
@@ -283,10 +359,9 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					pushToQueue(state, frame);
 					continue;
 				}
-				const opened = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
-					const ep = state.epochs.get(e);
-					return ep?.keys.get(pi) ?? null;
-				});
+				// Use the ratchet retry helper so that within-epoch key advances are
+				// also handled for queued frames, consistent with the live decode path.
+				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 
 				// Reassemble: [unencrypted prefix] [decrypted plaintext]
 				const plaintext = new Uint8Array(N + opened.byteLength);

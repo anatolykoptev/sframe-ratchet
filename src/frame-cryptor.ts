@@ -204,8 +204,8 @@ export class FrameCryptor {
 		const table = await deriveEpochKeyTable(
 			params.chainKey, params.epoch, params.peerIndexMap,
 		);
-		const bundles = new Map<PeerIndex, { cryptoKey: CryptoKey; salt: Uint8Array }>();
-		for (const [pi, k] of table) bundles.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt });
+		const bundles = new Map<PeerIndex, { cryptoKey: CryptoKey; salt: Uint8Array; rawKey: Uint8Array }>();
+		for (const [pi, k] of table) bundles.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });
 
 		// Always install, then rotate on sender role (also triggers wipe of old epochs).
 		this.worker.postMessage({
