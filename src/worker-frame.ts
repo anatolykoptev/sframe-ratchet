@@ -1,0 +1,226 @@
+// Frame-pipeline layer: encodeFrame / decodeFrame + the stream pipe wiring.
+// Concern: WebCrypto I/O per frame and the stale-epoch gate. Distinct from
+// worker-state.ts (epoch/key table bookkeeping) and worker.ts (DOM glue).
+// Spec §§ 2 L42, 2.2, 6.3, 7.4.
+//
+// M3.5: pre-epoch ring buffer. When decodeFrame can't find a key (epoch not
+// yet installed), the frame is queued in state.preEpochQueue (cap
+// PRE_EPOCH_QUEUE_CAP). drainPreEpochQueue() is called by worker-state.ts
+// after installEpoch to retry decryption. Overflow drops the oldest entry
+// and emits decrypt_failure{reason:'queue_overflow'}.
+
+import { parseHeader } from './sframe-header.ts';
+import { sframeDecrypt, sframeEncrypt } from './sframe.ts';
+import { splitKid } from './ratchet-ids.ts';
+import { PRE_EPOCH_QUEUE_CAP, type Side, type WorkerState } from './worker-types.ts';
+import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
+
+export function pipe(
+	state: WorkerState,
+	side: Side,
+	readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>,
+	writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>,
+): void {
+	const transform = new TransformStream<
+		RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+		RTCEncodedVideoFrame | RTCEncodedAudioFrame
+	>({
+		async transform(frame, controller) {
+			try {
+				if (side === 'encode') await encodeFrame(state, frame);
+				else await decodeFrame(state, frame);
+				controller.enqueue(frame);
+			} catch (err) {
+				// M3.3 race gotcha #1: a sender-side frame may arrive at the
+				// transform BEFORE the first epoch propagates over DC id:1.
+				// `encodeFrame` throws "worker: no active send epoch" in that
+				// window. Surface a breadcrumb so the smoke test can grep for
+				// it; the frame is dropped (not queued) — by the time the
+				// epoch lands the encoder has already moved on, and a delayed
+				// frame would carry a stale CTR. M3.4 may add a small
+				// pre-epoch buffer; for now the keyframe-request loop will
+				// recover the receiver's video within ~1s.
+				const msg = err instanceof Error ? err.message : String(err);
+				if (side === 'encode' && msg === 'worker: no active send epoch') {
+					console.warn('[gc:e2e] frame before epoch — dropped');
+				}
+				// Decode-side: decodeFrame already called state.emit(decrypt_failure)
+				// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
+				// so developers can see individual frame drops without prod noise.
+				if (side === 'decode' && (globalThis as Record<string, unknown>).__e2e_debug === true) {
+					console.warn('[sframe] decode drop', { reason: msg });
+				}
+				// Drop frames that fail to decrypt; sender-side errors are fatal.
+				if (side === 'encode') throw err;
+			}
+		},
+	});
+	readable.pipeThrough(transform).pipeTo(writable).catch(() => {
+		// Stream terminated; nothing to do.
+	});
+}
+
+export async function encodeFrame(
+	state: WorkerState,
+	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+): Promise<void> {
+	const entry = state.epochs.get(state.currentEpoch);
+	if (!entry) throw new Error('worker: no active send epoch');
+	const key = entry.keys.get(entry.selfPeerIndex);
+	if (!key) throw new Error('worker: no self key in current epoch');
+
+	// Atomic read-then-increment of the sender-wide CTR. Shared across all
+	// SSRCs (audio + video + …) the sender emits under this epoch, matching
+	// spec §2 L42 / §2.2 per-sender-per-epoch invariant.
+	const ctr = state.ctr;
+	state.ctr = ctr + 1n;
+
+	const plaintext = new Uint8Array(frame.data);
+	const sealed = await sframeEncrypt(plaintext, key, ctr);
+	frame.data = toExclusiveArrayBuffer(sealed);
+	// TODO(#group-calls-vp8): leave VP8 payload-descriptor bytes unencrypted
+	// so the SFU can route keyframes. VP8 path lands alongside codec work.
+}
+
+export async function decodeFrame(
+	state: WorkerState,
+	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+): Promise<void> {
+	const buf = new Uint8Array(frame.data);
+	let hdrKid = -1;
+	let hdrEpoch = -1;
+	let hdrPeerIndex = -1;
+	let hdrCtr = 0n;
+	try {
+		const hdr = parseHeader(buf);
+		const { epoch, peerIndex } = splitKid(hdr.kid);
+		hdrKid = hdr.kid; hdrEpoch = epoch; hdrPeerIndex = peerIndex; hdrCtr = hdr.ctr;
+		// Stale-epoch gate — fire BEFORE any decrypt attempt (spec §7.4).
+		if (epoch < state.currentMinValidEpoch) {
+			state.emit({
+				type: 'decrypt_failure', reason: 'stale_epoch',
+				kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+			});
+			throw new Error('stale_epoch');
+		}
+		// M3.5: pre-epoch race guard. If NO epoch has ever been installed yet
+		// (currentEpoch === -1), this receiver is still waiting for its first
+		// KeyExchange identity exchange to complete. Queue the frame for retry
+		// instead of dropping it silently.
+		//
+		// We restrict queuing to the truly-no-epoch case (currentEpoch === -1)
+		// rather than any missing epoch: once the receiver has at least one
+		// epoch installed, a frame for an unknown epoch is a genuine cross-epoch
+		// mismatch (wrong sender state), not a timing race.
+		//
+		// M3.4 deferred — multi-epoch races during rotation surface as
+		// decrypt_failed (not re-queued); distinguish via reason field in events.
+		if (state.currentEpoch === -1) {
+			enqueuePreEpoch(state, frame);
+			return; // not an error from caller's perspective
+		}
+		const opened = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+			const entry = state.epochs.get(e);
+			return entry?.keys.get(pi) ?? null;
+		});
+		frame.data = toExclusiveArrayBuffer(opened);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (msg !== 'stale_epoch') {
+			state.emit({
+				type: 'decrypt_failure', reason: 'decrypt_failed',
+				kid: hdrKid >= 0 ? hdrKid : undefined,
+				epoch: hdrEpoch >= 0 ? hdrEpoch : undefined,
+				peerIndex: hdrPeerIndex >= 0 ? hdrPeerIndex : undefined,
+				ctr: hdrCtr,
+				detail: msg,
+			});
+		}
+		throw err;
+	}
+}
+
+/**
+ * Push a frame into the pre-epoch queue, enforcing the FIFO ring cap.
+ * Overflow drops the oldest entry and emits decrypt_failure{reason:'queue_overflow'}.
+ * Used by both enqueuePreEpoch (initial enqueue) and drainPreEpochQueue
+ * (re-enqueue on still-missing key) so cap is enforced on all paths.
+ */
+function pushToQueue(
+	state: WorkerState,
+	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+): void {
+	if (state.preEpochQueue.length >= PRE_EPOCH_QUEUE_CAP) {
+		// Drop oldest (FIFO ring — shift the front).
+		state.preEpochQueue.shift();
+		state.emit({ type: 'decrypt_failure', reason: 'queue_overflow' });
+	}
+	state.preEpochQueue.push({ frame });
+}
+
+/**
+ * Enqueue a frame that failed decrypt due to missing epoch. Delegates to
+ * pushToQueue to enforce the bounded ring cap consistently.
+ */
+function enqueuePreEpoch(
+	state: WorkerState,
+	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+): void {
+	pushToQueue(state, frame);
+}
+
+/**
+ * Drain the pre-epoch frame queue by retrying decryption with the now-installed
+ * epoch keys. Called by worker-state.ts after installEpoch. Frames that still
+ * fail (e.g. they were for a different epoch not yet available) stay queued.
+ */
+export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
+	// Re-entrancy guard: if another drain is already running (concurrent epoch
+	// message or rotate arriving mid-await), return early. The next installEpoch
+	// will trigger a fresh drain call — correct path, no frames lost.
+	if (state.draining) return;
+	state.draining = true;
+	try {
+		// Single-pass snapshot: take all currently queued frames and clear the queue.
+		// Frames that arrive during our awaits land in preEpochQueue and will be
+		// processed by the drain triggered from the *next* installEpoch call.
+		// This eliminates the livelock: if no key arrives for a given epoch, frames
+		// are re-enqueued and the function returns — it does NOT re-loop.
+		const pending = state.preEpochQueue.splice(0);
+		for (const { frame } of pending) {
+			const buf = new Uint8Array(frame.data);
+			try {
+				const hdr = parseHeader(buf);
+				const { epoch, peerIndex } = splitKid(hdr.kid);
+				if (epoch < state.currentMinValidEpoch) {
+					// Frame became stale while queued — discard silently (already
+					// past grace window; re-emitting decrypt_failure would spam).
+					continue;
+				}
+				const entry = state.epochs.get(epoch);
+				const key = entry?.keys.get(peerIndex) ?? null;
+				if (!key) {
+					// Still no key for this epoch — re-enqueue via pushToQueue (enforces
+					// cap). Will be retried when the correct epoch's installEpoch fires.
+					pushToQueue(state, frame);
+					continue;
+				}
+				const opened = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+					const ep = state.epochs.get(e);
+					return ep?.keys.get(pi) ?? null;
+				});
+				frame.data = toExclusiveArrayBuffer(opened);
+			} catch (err) {
+				// Decrypt error on retry — emit observability event (CLAUDE.md: no silent errors).
+				const detail = err instanceof Error ? err.message : String(err);
+				state.emit({
+					type: 'decrypt_failure', reason: 'decrypt_failed_after_epoch',
+					detail,
+				});
+			}
+		}
+	} finally {
+		state.draining = false;
+	}
+}
+
