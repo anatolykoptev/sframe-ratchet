@@ -9,8 +9,8 @@
 // after installEpoch to retry decryption. Overflow drops the oldest entry
 // and emits decrypt_failure{reason:'queue_overflow'}.
 
-import { parseHeader } from './sframe-header.ts';
-import { sframeDecrypt, sframeEncrypt } from './sframe.ts';
+import { parseHeader, serializeHeader } from './sframe-header.ts';
+import { sframeDecrypt, sframeEncrypt, sframeEncryptInto } from './sframe.ts';
 import { splitKid } from './ratchet-ids.ts';
 import { deriveNextSenderKey } from './ratchet-crypto.ts';
 import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
@@ -98,17 +98,22 @@ export async function encodeFrame(
 	const prefix = plaintext.subarray(0, N);  // untouched
 	const body = plaintext.subarray(N);       // encrypted
 
-	const sealed = await sframeEncrypt(body, key, ctr);
-
-	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag] [SIF trailer (optional)]
-	// The SIF trailer is appended OUTSIDE the AEAD — it is a routing hint, not a security boundary.
+	// Hot path: build wire buffer in one allocation.
+	// Serialise header first so we know its length for sizing the buffer.
+	const header = serializeHeader(key.kid, ctr);
+	// AEAD_TAG_BYTES (16) is baked into sframeEncryptInto; body.length is plaintext.
+	const AEAD_TAG_BYTES = 16;
 	const trailer = state.sifTrailer;
 	const trailerLen = trailer ? trailer.byteLength : 0;
-	const wire = new Uint8Array(N + sealed.byteLength + trailerLen);
-	wire.set(prefix, 0);
-	wire.set(sealed, N);
-	if (trailer) wire.set(trailer, N + sealed.byteLength);
-	frame.data = toExclusiveArrayBuffer(wire);
+	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag] [SIF trailer (optional)]
+	// The SIF trailer is appended OUTSIDE the AEAD — it is a routing hint, not a security boundary.
+	const wire = new Uint8Array(N + header.length + body.byteLength + AEAD_TAG_BYTES + trailerLen);
+	if (N > 0) wire.set(prefix, 0);
+	const written = await sframeEncryptInto(wire, N, header, body, key, ctr);
+	if (trailer) wire.set(trailer, N + written);
+	// wire is a freshly allocated exclusive ArrayBuffer — .buffer is safe to assign
+	// directly without the toExclusiveArrayBuffer copy.
+	frame.data = wire.buffer;
 	emitMetric(state, {
 		kind: 'encrypt',
 		epoch: key.epoch,

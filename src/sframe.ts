@@ -9,7 +9,7 @@
 import type { SFrameKey, SFrameKeyResolver } from './types.ts';
 import { parseHeader, serializeHeader } from './sframe-header.ts';
 import { splitKid } from './ratchet-ids.ts';
-import { toArrayBuffer as asArrayBuffer } from './internal/buffer.js';
+import { toArrayBuffer as asArrayBuffer, bufferSourceOf } from './internal/buffer.js';
 import { AEADAuthError, KeyNotFoundError } from './errors.ts';
 
 // Re-export for consumers who want the header API via this module.
@@ -35,8 +35,10 @@ export async function sframeEncrypt(
 		await crypto.subtle.encrypt(
 			{
 				name: 'AES-GCM',
-				iv: asArrayBuffer(iv),
-				additionalData: asArrayBuffer(header),
+				// iv and header are freshly allocated — skip copy via bufferSourceOf.
+				// plaintext is caller-supplied and may be a subarray; use the safe copy.
+				iv: bufferSourceOf(iv),
+				additionalData: bufferSourceOf(header),
 				tagLength: AEAD_TAG_BYTES * 8,
 			},
 			key.cryptoKey,
@@ -82,8 +84,11 @@ export async function sframeDecrypt(
 		const pt = await crypto.subtle.decrypt(
 			{
 				name: 'AES-GCM',
-				iv: asArrayBuffer(iv),
-				additionalData: asArrayBuffer(header),
+				// iv is freshly allocated — skip copy. header is a subarray of the
+				// incoming sframe buffer so bufferSourceOf will correctly fall back
+				// to a copy; body is also caller-supplied, always copy.
+				iv: bufferSourceOf(iv),
+				additionalData: bufferSourceOf(header),
 				tagLength: AEAD_TAG_BYTES * 8,
 			},
 			key.cryptoKey,
@@ -96,6 +101,53 @@ export async function sframeDecrypt(
 			{ kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr },
 		);
 	}
+}
+
+/**
+ * Encrypt `body` directly into a pre-allocated output buffer.
+ *
+ * This is the hot-path variant of `sframeEncrypt` for `encodeFrame`.
+ * The caller pre-serialises the header (via `serializeHeader`), sizes
+ * the wire buffer, and passes it in with an offset.  This avoids the
+ * extra `new Uint8Array` allocation that `sframeEncrypt` produces for
+ * the `[header][ciphertext]` concatenation.
+ *
+ * Wire layout written starting at `out[offset]`:
+ *   [header.length bytes] [AES-GCM ciphertext + 16B tag]
+ *
+ * Returns the number of bytes written (header.length + body.length + 16).
+ *
+ * Invariants (not checked — caller guarantees):
+ *  - `out` is a freshly allocated exclusive ArrayBuffer view (not a subarray).
+ *  - `out.byteLength >= offset + header.length + body.length + AEAD_TAG_BYTES`.
+ *  - `header` is the result of `serializeHeader(key.kid, ctr)`.
+ *
+ * Internal API — not exported from the public barrel.
+ */
+export async function sframeEncryptInto(
+	out: Uint8Array,
+	offset: number,
+	header: Uint8Array,
+	body: Uint8Array,
+	key: SFrameKey,
+	ctr: bigint,
+): Promise<number> {
+	const iv = deriveIv(key.salt, ctr);
+	const ct = new Uint8Array(
+		await crypto.subtle.encrypt(
+			{
+				name: 'AES-GCM',
+				iv: bufferSourceOf(iv),
+				additionalData: bufferSourceOf(header),
+				tagLength: AEAD_TAG_BYTES * 8,
+			},
+			key.cryptoKey,
+			asArrayBuffer(body),
+		),
+	);
+	out.set(header, offset);
+	out.set(ct, offset + header.length);
+	return header.length + ct.length;
 }
 
 /**

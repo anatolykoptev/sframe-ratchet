@@ -25,3 +25,30 @@ export function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
 	new Uint8Array(out).set(u8);
 	return out;
 }
+
+/**
+ * Returns a BufferSource safe to pass to WebCrypto.
+ *
+ * Skips the copy when the Uint8Array owns its entire underlying buffer
+ * (byteOffset === 0 && byteLength === buffer.byteLength) AND the buffer
+ * is a plain ArrayBuffer (not SharedArrayBuffer).
+ *
+ * Use ONLY for buffers known to be freshly allocated by this library
+ * (e.g. deriveIv output, serializeHeader output). Do NOT use for
+ * caller-supplied buffers where subarray/shared status is unknown —
+ * use the existing toArrayBuffer copy for those.
+ */
+export function bufferSourceOf(u8: Uint8Array): BufferSource {
+	if (
+		u8.byteOffset === 0 &&
+		u8.byteLength === u8.buffer.byteLength &&
+		!(typeof SharedArrayBuffer !== 'undefined' && u8.buffer instanceof SharedArrayBuffer)
+	) {
+		// We've excluded SharedArrayBuffer above; cast is sound.
+		return u8.buffer as ArrayBuffer;
+	}
+	// Subarray or SharedArrayBuffer — fall back to an exclusive copy.
+	const out = new ArrayBuffer(u8.byteLength);
+	new Uint8Array(out).set(u8);
+	return out;
+}
