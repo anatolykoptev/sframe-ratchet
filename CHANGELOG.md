@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-14
+
+### Added
+- NIST CAVP test vectors for AES-GCM (SP 800-38D) and HKDF (RFC 5869) — `src/__tests__/cavp.test.ts`
+- Constant-time SIF trailer comparison — branchless XOR-OR fold, prevents timing leak on trailer match
+- Strict-FIPS mode flag — `enableStrictFips()` rejects AES-128, rejects SimpleKex, enforces non-extractable keys
+- `FipsModeViolationError` typed error
+- `docs/COMPLIANCE.md` — FIPS 140-3, HIPAA, CNSA alignment map with explicit out-of-scope boundaries
+- README "FIPS strict mode" and "Compliance" sections
+
+### Changed
+- WebCrypto `importKey` now always uses `extractable: false` via internal helper — structural enforcement, no API surface change
+- `docs/SECURITY.md` gains "Side channels" section
+
+### Tests
+- 198 → 264 (+66 across CAVP, constant-time, strict-FIPS)
+
 ## [0.2.0] — 2026-05-14
 
 ### Added
@@ -42,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - KID packing helpers (`makeKid`, `joinKid`, `splitKid`, `buildPeerIndexMap`, `validatePeerIndexMap`)
 - 38-test suite covering AEAD, ratchet epoch lifecycle, worker frame queue, and transit-only mode
 
-[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anatolykoptev/sframe-ratchet/releases/tag/v0.1.0

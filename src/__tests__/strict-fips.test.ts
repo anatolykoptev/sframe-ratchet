@@ -46,7 +46,7 @@ describe('default state — strict mode off', () => {
 	});
 
 	it('RoomRatchet with suite 4 works', async () => {
-		const id = await newIdentity();
+		const id = await newIdentity('peer-a');
 		expect(() => new RoomRatchet({ identity: id, suite: 'AES_128_GCM_SHA256' })).not.toThrow();
 	});
 });
@@ -104,13 +104,13 @@ describe('enableStrictFips() — all defaults true', () => {
 
 	it('RoomRatchet with suite 4 throws FipsModeViolationError', async () => {
 		enableStrictFips();
-		const id = await newIdentity();
+		const id = await newIdentity('peer-a');
 		expect(() => new RoomRatchet({ identity: id, suite: 'AES_128_GCM_SHA256' })).toThrow(FipsModeViolationError);
 	});
 
 	it('RoomRatchet with suite 5 still works', async () => {
 		enableStrictFips();
-		const id = await newIdentity();
+		const id = await newIdentity('peer-a');
 		expect(() => new RoomRatchet({ identity: id, suite: 'AES_256_GCM_SHA512' })).not.toThrow();
 	});
 });
