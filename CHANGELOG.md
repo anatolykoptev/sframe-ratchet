@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-14
+
+### Performance
+- Bundle minified — dist JS reduced 49% (46 kB → 23 kB), tarball 30.1 → 26.1 kB
+- Vitest test pool now parallel (threads, 2-4 workers) — test wall time reduced from ~4.25s to ~1.5s
+- Hot-path encode: skip redundant `toArrayBuffer` copies for fresh iv/header buffers, collapse double Uint8Array allocation in `encodeFrame`. Saves ~3 allocations per frame.
+
+### Removed
+- Internal HKDF helpers removed from public barrel (semver minor pre-1.0): `hkdfInfo`, `peerIndexBe16`, `SFRAME_INFO_KEY`, `SFRAME_INFO_SALT`, `joinKid`. Available via internal imports if needed.
+
+### Tests
+- Shared test fixtures extracted to `src/__tests__/helpers.ts` (makeFrame, makeBundle, makeBundles) — net −100 lines, no behaviour change.
+- 264 → 277 tests (+13 from encode-fast-path coverage)
+
 ## [0.3.0] — 2026-05-14
 
 ### Added
@@ -59,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - KID packing helpers (`makeKid`, `joinKid`, `splitKid`, `buildPeerIndexMap`, `validatePeerIndexMap`)
 - 38-test suite covering AEAD, ratchet epoch lifecycle, worker frame queue, and transit-only mode
 
-[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anatolykoptev/sframe-ratchet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anatolykoptev/sframe-ratchet/releases/tag/v0.1.0
