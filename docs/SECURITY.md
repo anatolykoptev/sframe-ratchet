@@ -45,6 +45,30 @@ The adversary cannot:
 
 - **Ratchet retry window (liveness feature, NOT a security feature).** The decode pipeline attempts up to `ratchetWindowSize` forward derivation steps on AEAD failure for a known epoch + known peer. This smooths over RTP delivery jitter when the sender has advanced their per-sender key slightly ahead of what the receiver has cached. It does **not** widen the attacker's ability to decrypt: every retried key is still derived from the same HKDF chain that originates in the shared ChainKey, which the attacker does not have. An attacker cannot produce a valid ciphertext for any step in the chain without the ChainKey, regardless of window size. The retry window is bounded to prevent unbounded computation (default 8 steps; set to 0 to disable entirely via `set-ratchet-window`). Frames from a completely different epoch, or with an unknown peer index, still fail immediately without consuming retry budget.
 
+## FIPS / HIPAA conformance
+
+`sframe-ratchet` provides two cipher suites (RFC 9605 §4.5) for environments with regulatory requirements:
+
+| Suite | AEAD | KDF | FIPS relevance |
+|-------|------|-----|----------------|
+| `AES_128_GCM_SHA256` (default) | AES-128-GCM | HKDF-SHA-256 | NIST-approved: FIPS 197 (AES), NIST SP 800-56C (HKDF) |
+| `AES_256_GCM_SHA512` | AES-256-GCM | HKDF-SHA-512 | NIST-approved: FIPS 197 (AES-256), NIST SP 800-56C (HKDF) |
+
+**How to select a suite:**
+
+```ts
+import { RoomRatchet, newIdentity } from 'sframe-ratchet';
+
+const ratchet = new RoomRatchet({
+  identity: newIdentity('alice'),
+  suite: 'AES_256_GCM_SHA512', // HIPAA / AES-256 requirement
+});
+```
+
+**FIPS validation:** All cryptographic operations use the host platform's WebCrypto implementation (`crypto.subtle`). FIPS 140-2/140-3 validation status depends on the WebCrypto provider used by the runtime (browser, Node.js, Deno, etc.). The library does not bundle any cryptographic primitives for AES-GCM; it relies entirely on WebCrypto for AEAD. The X25519 DH step uses `@noble/curves` as a fallback when WebCrypto X25519 is unavailable; if FIPS-certified X25519 is required, the caller must ensure the WebCrypto X25519 path is available and operational in the target runtime.
+
+**Breaking change from 0.1.0:** The default suite changed from an undocumented 32-byte-AES-256-SHA-256 combination (which matched no RFC 9605 suite) to AES-128-GCM + SHA-256 (RFC 9605 suite 4). Frames encrypted with the 0.1.0 code path cannot be decrypted with 0.2.0 code. See `CHANGELOG.md` for migration notes.
+
 ## Key handling guarantees
 
 - **Chain keys are derived on the main thread** and held there for the lifetime of an epoch. They are never serialized over `postMessage` as raw bytes. The `FrameCryptor.setEpoch` API takes a chain key on main, derives the per-sender key table locally, and posts only the resulting `CryptoKey` handles to the worker.

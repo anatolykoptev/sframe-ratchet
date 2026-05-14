@@ -8,7 +8,7 @@
 // the worker — raw ChainKey bytes never cross the postMessage boundary.
 
 import type { PeerIndex, SFrameSupport } from './types.ts';
-import { deriveEpochKeyTable } from './ratchet-crypto.ts';
+import { DEFAULT_CIPHER_SUITE, type CipherSuite, deriveEpochKeyTable } from './ratchet-crypto.ts';
 
 export { validatePeerIndexMap } from './ratchet-ids.ts';
 
@@ -20,6 +20,11 @@ export interface FrameCryptorOptions {
 	peerId: string;
 	/** This node's peer_index in the starting epoch (may be rotated later). */
 	peerIndex: PeerIndex;
+	/**
+	 * RFC 9605 §4.5 cipher suite. Defaults to `AES_128_GCM_SHA256` (suite 4).
+	 * All members of a room MUST use the same suite.
+	 */
+	suite?: CipherSuite;
 }
 
 /** Parameters for setEpoch — post-revision per-epoch key install. */
@@ -71,6 +76,7 @@ export class FrameCryptor {
 	private readonly worker: Worker;
 	private readonly role: Role;
 	private readonly peerId: string;
+	private readonly suite: CipherSuite;
 	private currentPeerIndex: PeerIndex;
 	private attached: Array<() => void> = [];
 	private initialised = false;
@@ -82,6 +88,7 @@ export class FrameCryptor {
 		this.worker = opts.worker;
 		this.role = opts.role;
 		this.peerId = opts.peerId;
+		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
 		this.currentPeerIndex = opts.peerIndex;
 		const { native, fallback } = supportsSFrame();
 		this.transitOnly = !native && !fallback;
@@ -91,7 +98,7 @@ export class FrameCryptor {
 		if (this.initialised) return;
 		this.worker.postMessage({
 			type: 'init', role: this.role, peerId: this.peerId,
-			peerIndex: this.currentPeerIndex,
+			peerIndex: this.currentPeerIndex, suite: this.suite,
 		});
 		this.initialised = true;
 	}
@@ -202,7 +209,7 @@ export class FrameCryptor {
 		this.currentPeerIndex = selfPeerIndex;
 
 		const table = await deriveEpochKeyTable(
-			params.chainKey, params.epoch, params.peerIndexMap,
+			params.chainKey, params.epoch, params.peerIndexMap, this.suite,
 		);
 		const bundles = new Map<PeerIndex, { cryptoKey: CryptoKey; salt: Uint8Array; rawKey: Uint8Array }>();
 		for (const [pi, k] of table) bundles.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });

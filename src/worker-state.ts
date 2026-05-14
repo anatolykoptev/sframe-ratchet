@@ -9,6 +9,7 @@ import { makeKid } from './ratchet-ids.ts';
 import type { PeerIndex, SFrameKey } from './types.ts';
 import { drainPreEpochQueue, pipe } from './worker-frame.ts';
 import { emitMetric } from './metrics.ts';
+import { DEFAULT_CIPHER_SUITE } from './ratchet-crypto.ts';
 import {
 	GRACE_WINDOW_MS,
 	type InMsg,
@@ -22,6 +23,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		role: null,
 		peerId: null,
 		selfPeerIndex: null,
+		suite: DEFAULT_CIPHER_SUITE,
 		epochs: new Map(),
 		currentEpoch: -1,
 		currentMinValidEpoch: 0,
@@ -43,6 +45,7 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			state.role = msg.role;
 			state.peerId = msg.peerId;
 			state.selfPeerIndex = msg.peerIndex;
+			if (msg.suite !== undefined) state.suite = msg.suite;
 			state.emit({ type: 'ready' });
 			return;
 		case 'epoch':

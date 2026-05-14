@@ -27,11 +27,26 @@ Existing implementations cover parts of the problem but not the whole:
 ## Features
 
 - RFC 9605 SFrame frame format and AES-GCM AEAD
+- **AES-128 and AES-256 cipher suites (RFC 9605 §4.5):** suite 4 (`AES_128_GCM_SHA256`, default) and suite 5 (`AES_256_GCM_SHA512`) — select per room
 - Epoch ratchet: per-sender chain-key derivation, epoch rotation, 5-second grace period for in-flight frames from the prior epoch
 - Web Worker pipeline that isolates `CryptoKey` material from the main thread (via `RTCRtpScriptTransform` when available, `createEncodedStreams` as fallback)
 - X25519 key agreement via WebCrypto with a `@noble/curves` fallback for runtimes that lack it
 - Zero transport dependencies — bring your own key exchange and signaling
 - Browser-first; Node 20+ supported for tests
+
+### FIPS / HIPAA
+
+Suite 5 (`AES_256_GCM_SHA512`) uses AES-256-GCM (FIPS 197) and HKDF-SHA-512 (NIST SP 800-56C). Suite 4 (`AES_128_GCM_SHA256`) uses AES-128-GCM and HKDF-SHA-256, also NIST-approved. All cryptographic operations use the host platform's WebCrypto (`crypto.subtle`); FIPS 140-2/140-3 validation status depends on the runtime's WebCrypto implementation.
+
+```ts
+import { RoomRatchet, newIdentity } from 'sframe-ratchet';
+
+// AES-256 for HIPAA / high-assurance deployments
+const ratchet = new RoomRatchet({
+  identity: newIdentity('alice'),
+  suite: 'AES_256_GCM_SHA512',
+});
+```
 
 ## Install
 
@@ -74,9 +89,9 @@ const ck1Alice = kexAlice.rotateEpoch(ckAlice, 1);
 
 ### Production: bring your own KEX
 
-For production, replace `SimpleKex` with a real key-agreement protocol. The library is KEX-agnostic — any mechanism that produces a shared 32-byte `ChainKey` per epoch integrates with `deriveSenderKeys`:
+For production, replace `SimpleKex` with a real key-agreement protocol. The library is KEX-agnostic — any mechanism that produces a shared ChainKey per epoch integrates with `deriveSenderKeys`. The ChainKey size is suite-dependent: 32 bytes for suite 4 (SHA-256), 64 bytes for suite 5 (SHA-512).
 
-- **MLS**: use `@signalapp/libsignal-client` or `mls-rs` to negotiate epoch keys; extract 32 bytes via your exporter and pass them as the `chainKey` argument.
+- **MLS**: use `@signalapp/libsignal-client` or `mls-rs` to negotiate epoch keys; extract the appropriate number of bytes via your exporter and pass them as the `chainKey` argument.
 - **X3DH**: perform the handshake off-band, derive a shared secret, and feed it through `HKDF` to your `chainKey`.
 - **Custom ECDH**: wrap your DH output in `HKDF-SHA-256` to produce 32 uniform bytes.
 

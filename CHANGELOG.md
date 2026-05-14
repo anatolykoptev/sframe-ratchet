@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+
+- **Default cipher suite corrected to RFC 9605 suite 4 (`AES_128_GCM_SHA256`).** The 0.1.0 code path derived 32-byte AEAD keys using SHA-256 HKDF, which matched no defined RFC 9605 suite. The corrected default (suite 4) derives **16-byte AES-128-GCM** keys using SHA-256 HKDF. Frames encrypted with 0.1.0 **cannot be decrypted** with 0.2.0 code. Known internal consumers (e.g. oxpulse-chat) must re-key or pin to 0.1.0 until they upgrade.
+
+### Added
+
+- **Suite 5 (`AES_256_GCM_SHA512`):** AES-256-GCM AEAD with HKDF-SHA-512 and 64-byte ChainKey. Select per room via `suite: 'AES_256_GCM_SHA512'` on `RoomRatchet`, `FrameCryptor`, and `SimpleKex`.
+- `CipherSuite` type, `DEFAULT_CIPHER_SUITE` constant, `suiteParams()` helper exported from the public barrel.
+- `suite` field on `RoomRatchetOptions`, `FrameCryptorOptions`, `SimpleKexConfig`, and `WorkerState`.
+- `SimpleKex` now uses PBKDF2-SHA-512 and HKDF-SHA-512 when `suite: 'AES_256_GCM_SHA512'` is set.
+- New test file `src/__tests__/cipher-suite-5.test.ts` (19 tests): suite 5 round-trip, SimpleKex integration, suite isolation, and a locked deterministic regression vector.
+- `docs/ARCHITECTURE.md` — "Cipher suites" section with RFC §4.5 table and FIPS/HIPAA framing.
+- `docs/SECURITY.md` — "FIPS / HIPAA conformance" section with primitive table, conformance note, and migration guidance.
+
 ## [0.1.0] - 2026-05-13
 
 ### Added

@@ -13,6 +13,8 @@ import type {
 } from './types.ts';
 import { KeyNotFoundError } from './errors.ts';
 import {
+	DEFAULT_CIPHER_SUITE,
+	type CipherSuite,
 	deriveEpochKeyTable,
 	deriveSenderKeys,
 	deriveWrapKey,
@@ -42,6 +44,11 @@ export interface RoomRatchetOptions {
 	identity: IdentityKeyPair;
 	/** Known members at construction time (excluding self). */
 	initialPeers?: PeerIdentity[];
+	/**
+	 * RFC 9605 §4.5 cipher suite. Defaults to `AES_128_GCM_SHA256` (suite 4).
+	 * All members of a room MUST use the same suite.
+	 */
+	suite?: CipherSuite;
 }
 
 /**
@@ -54,12 +61,14 @@ export interface RoomRatchetOptions {
  */
 export class RoomRatchet {
 	private readonly identity: IdentityKeyPair;
+	private readonly suite: CipherSuite;
 	private peers: Map<string, PeerIdentity>;
 	private epochs: Map<number, EpochState> = new Map();
 	private currentEpoch = -1;
 
 	constructor(opts: RoomRatchetOptions) {
 		this.identity = opts.identity;
+		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
 		this.peers = new Map();
 		for (const p of opts.initialPeers ?? []) this.peers.set(p.peerId, p);
 	}
@@ -82,7 +91,7 @@ export class RoomRatchet {
 		if (options.viaChainKey) {
 			chainKey = options.viaChainKey;
 		} else if (this.isAuthoritativeAuthor()) {
-			chainKey = randomChainKey();
+			chainKey = randomChainKey(this.suite);
 		} else {
 			throw new Error('ratchet: non-authoritative author called startNewEpoch without viaChainKey');
 		}
@@ -134,7 +143,7 @@ export class RoomRatchet {
 		if (selfPeerIndex === undefined) {
 			throw new Error('ratchet: self peer_id missing from peer_index_map');
 		}
-		const keys = await deriveEpochKeyTable(chainKey, version, peerIndexMap);
+		const keys = await deriveEpochKeyTable(chainKey, version, peerIndexMap, this.suite);
 		this.epochs.set(version, {
 			epoch: version, chainKey, peerIndexMap, selfPeerIndex, keys,
 		});

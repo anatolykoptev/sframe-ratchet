@@ -97,6 +97,28 @@ These three behaviors are covered by tests in `src/__tests__/sframe.smoke.test.t
 
 **Within-epoch ratchet retry window** (`ratchetWindowSize`, default 8): When a sender advances their per-sender key (a forward-secrecy step within an epoch) and in-flight frames encrypted with the OLD key arrive after the receiver expects the new one, AEAD fails. The retry window derives the next step via `deriveNextSenderKey(rawKey, salt, epoch, peerIndex)` — a HKDF-Expand from the current raw key bytes — and retries up to `ratchetWindowSize` times. On success at step N the cached key is advanced so subsequent frames at that step decrypt immediately. On exhaustion the original error is surfaced. Controlled at runtime via the `set-ratchet-window` message. The drain loop (`drainPreEpochQueue`) applies the same retry logic for consistency.
 
+## Cipher suites (RFC 9605 §4.5)
+
+`sframe-ratchet` implements two of the five cipher suites defined in RFC 9605 §4.5, both using AES-GCM and WebCrypto:
+
+| Suite | ID | `CipherSuite` value | AEAD | AEAD key | KDF hash | KDF output (ChainKey) | Tag |
+|-------|----|---------------------|------|----------|----------|-----------------------|-----|
+| 4 | `0x0004` | `AES_128_GCM_SHA256` | AES-128-GCM | 16 bytes | SHA-256 | 32 bytes | 16 bytes |
+| 5 | `0x0005` | `AES_256_GCM_SHA512` | AES-256-GCM | 32 bytes | SHA-512 | 64 bytes | 16 bytes |
+
+Suite 4 is the default and matches the RFC 9605 mandatory baseline. Suite 5 provides AES-256 + SHA-512 for FIPS/HIPAA environments that require 256-bit AES keys.
+
+The suite governs:
+- The **HKDF hash** used to derive per-sender AEAD keys and salts from the ChainKey.
+- The **AEAD key length** (16 or 32 bytes) imported into WebCrypto for AES-GCM.
+- The **ChainKey size** — RFC §4.4.1 defines the base-key size as `KDF.Nh` (SHA-256 → 32 bytes; SHA-512 → 64 bytes).
+
+The suite does **not** govern the X25519 DH key agreement or the AES-GCM chain-key wrap transport (those always use AES-256-GCM + HKDF-SHA-256 as an internal mechanism).
+
+All parties in a room **must** agree on the same suite. The suite is set at construction time on `RoomRatchet`, `FrameCryptor`, and `SimpleKex`, and is carried in the worker `init` message.
+
+**FIPS/HIPAA note:** Suite 5 uses AES-256-GCM (NIST-approved, FIPS 197) and HKDF-SHA-512 (NIST SP 800-56C). Suite 4 uses AES-128-GCM and HKDF-SHA-256, also NIST-approved. All cryptographic operations go through WebCrypto (`crypto.subtle`); FIPS validation status depends on the host platform's WebCrypto implementation.
+
 ## Main / worker split
 
 `CryptoKey` is the natural boundary. WebCrypto guarantees that an imported non-extractable key cannot be exported back to raw bytes from JavaScript. By doing the import on the main thread and posting only the resulting handle to the worker, two things hold simultaneously:

@@ -185,7 +185,7 @@ async function tryDecryptWithRatchet(
 	let currentRaw = key.rawKey;
 	const salt = key.salt;
 	for (let step = 1; step <= state.ratchetWindowSize; step++) {
-		const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex);
+		const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex, state.suite);
 		try {
 			const plaintext = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 				if (e === epoch && pi === peerIndex) return next;

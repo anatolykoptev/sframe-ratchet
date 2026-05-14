@@ -53,6 +53,13 @@ export {
 } from './ratchet-ids.js';
 export type { PeerIndexMapValidation } from './ratchet-ids.js';
 
+// ---- Cipher suites (RFC 9605 §4.5) ----------------------------------------
+export type { CipherSuite } from './ratchet-crypto.js';
+export {
+	DEFAULT_CIPHER_SUITE,
+	suiteParams,
+} from './ratchet-crypto.js';
+
 // ---- Ratchet crypto primitives -------------------------------------------
 export {
 	deriveSenderKeys,

@@ -17,7 +17,12 @@
 import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { CHAIN_KEY_BYTES } from './ratchet-crypto.ts';
+import { sha512 } from '@noble/hashes/sha2.js';
+import {
+	DEFAULT_CIPHER_SUITE,
+	type CipherSuite,
+	suiteParams,
+} from './ratchet-crypto.ts';
 
 // Default salt — a static constant so the library works out-of-the-box.
 // Production MUST override with a unique random salt per room to prevent
@@ -57,6 +62,16 @@ export interface SimpleKexConfig {
    * Do not lower below 100_000 in any code that touches real user data.
    */
   iterations?: number;
+
+  /**
+   * RFC 9605 §4.5 cipher suite to use for chain-key derivation.
+   *
+   * Determines the KDF hash (SHA-256 for suite 4, SHA-512 for suite 5) and the
+   * chain-key / PBKDF2 output length. Defaults to suite 4 (`AES_128_GCM_SHA256`).
+   *
+   * All parties in a room MUST agree on the same suite.
+   */
+  suite?: CipherSuite;
 }
 
 /**
@@ -66,8 +81,9 @@ export interface SimpleKexConfig {
  * **⚠ NOT FOR PRODUCTION ⚠**
  *
  * SimpleKex derives epoch chain keys from a shared password:
- * - Epoch 0: `PBKDF2-SHA-256(password, salt, iterations)` → 32-byte ChainKey
- * - Epoch N: `HKDF-SHA-256(prevChainKey, info="sframe-simple-kex/epoch/{N}")` → 32-byte ChainKey
+ * - Epoch 0 (suite 4): `PBKDF2-SHA-256(password, salt, iterations)` → 32-byte ChainKey
+ * - Epoch 0 (suite 5): `PBKDF2-SHA-512(password, salt, iterations)` → 64-byte ChainKey
+ * - Epoch N: `HKDF-<hash>(prevChainKey, info="sframe-simple-kex/epoch/{N}")` → suite-sized ChainKey
  *
  * This has **no forward secrecy**, **no membership consensus**, and **no
  * revocation**. It is suitable only for demos and local development.
@@ -94,6 +110,7 @@ export class SimpleKex {
   private readonly _secret: string;
   private readonly _salt: Uint8Array;
   private readonly _iterations: number;
+  readonly suite: CipherSuite;
 
   constructor(config: SimpleKexConfig) {
     if (!config.sharedSecret) {
@@ -102,6 +119,7 @@ export class SimpleKex {
     this._secret = config.sharedSecret;
     this._salt = config.salt ?? DEFAULT_SALT;
     this._iterations = config.iterations ?? 600_000;
+    this.suite = config.suite ?? DEFAULT_CIPHER_SUITE;
 
     if (this._iterations < 1) {
       throw new RangeError('SimpleKex: iterations must be >= 1');
@@ -109,45 +127,52 @@ export class SimpleKex {
   }
 
   /**
-   * Derive the initial chain key (epoch 0) from the shared password via
-   * PBKDF2-SHA-256.
+   * Derive the initial chain key (epoch 0) from the shared password via PBKDF2.
    *
-   * @returns 32-byte chain key suitable for {@link deriveSenderKeys}.
+   * Hash algorithm and output length are determined by the configured cipher suite:
+   * - Suite 4 (`AES_128_GCM_SHA256`): PBKDF2-SHA-256, 32-byte output
+   * - Suite 5 (`AES_256_GCM_SHA512`): PBKDF2-SHA-512, 64-byte output
+   *
+   * @returns Suite-sized chain key suitable for {@link deriveSenderKeys}.
    *
    * @remarks **NOT FOR PRODUCTION** — see class-level warning.
    */
   async initialEpoch(): Promise<Uint8Array> {
+    const { hash, chainKeyBytes } = suiteParams(this.suite);
     const password = new TextEncoder().encode(this._secret);
-    const derived = await pbkdf2Async(sha256, password, this._salt, {
+    const hashFn = hash === 'SHA-512' ? sha512 : sha256;
+    const derived = await pbkdf2Async(hashFn, password, this._salt, {
       c: this._iterations,
-      dkLen: CHAIN_KEY_BYTES,
+      dkLen: chainKeyBytes,
     });
     return derived;
   }
 
   /**
    * Derive the chain key for epoch `newEpoch` from the previous epoch's chain
-   * key via HKDF-SHA-256.
+   * key via HKDF using the suite's hash.
    *
    * Domain-separated by epoch number so each epoch yields distinct key
    * material even if the chain keys were somehow observed.
    *
-   * @param prev      32-byte chain key from epoch `newEpoch - 1`.
+   * @param prev      Suite-sized chain key from epoch `newEpoch - 1`.
    * @param newEpoch  The epoch number being advanced to (>= 1).
-   * @returns 32-byte chain key for the new epoch.
+   * @returns Suite-sized chain key for the new epoch.
    *
    * @remarks **NOT FOR PRODUCTION** — see class-level warning.
    */
   rotateEpoch(prev: Uint8Array, newEpoch: number): Uint8Array {
-    if (prev.length !== CHAIN_KEY_BYTES) {
+    const { hash, chainKeyBytes } = suiteParams(this.suite);
+    if (prev.length !== chainKeyBytes) {
       throw new TypeError(
-        `SimpleKex: prev chain key must be ${CHAIN_KEY_BYTES} bytes, got ${prev.length}`,
+        `SimpleKex: prev chain key must be ${chainKeyBytes} bytes for suite ${this.suite}, got ${prev.length}`,
       );
     }
     if (!Number.isInteger(newEpoch) || newEpoch < 1) {
       throw new RangeError(`SimpleKex: newEpoch must be an integer >= 1, got ${newEpoch}`);
     }
     const info = new TextEncoder().encode(`${EPOCH_INFO_PREFIX}${newEpoch}`);
-    return hkdf(sha256, prev, undefined, info, CHAIN_KEY_BYTES);
+    const hashFn = hash === 'SHA-512' ? sha512 : sha256;
+    return hkdf(hashFn, prev, undefined, info, chainKeyBytes);
   }
 }

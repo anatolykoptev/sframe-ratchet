@@ -5,6 +5,7 @@
 // No logic here — just types. Spec §§ 2.2, 4.3, 6.1, 7.4.
 
 import type { PeerIndex, SFrameKey } from './types.ts';
+import type { CipherSuite } from './ratchet-crypto.ts';
 
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
@@ -31,7 +32,7 @@ export interface PerSenderKeyBundle {
 	rawKey: Uint8Array;
 }
 
-export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex }
+export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite }
 export interface EpochMsg {
 	type: 'epoch';
 	epoch: number;
@@ -115,6 +116,8 @@ export interface WorkerState {
 	role: Role | null;
 	peerId: string | null;
 	selfPeerIndex: PeerIndex | null;
+	/** RFC 9605 §4.5 cipher suite active for this worker. */
+	suite: CipherSuite;
 	epochs: Map<number, EpochEntry>; // receive table (spec §4.3 L145)
 	currentEpoch: number;
 	currentMinValidEpoch: number; // stale-epoch gate (spec §7.4)
