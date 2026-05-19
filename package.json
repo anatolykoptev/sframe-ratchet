@@ -1,6 +1,6 @@
 {
   "name": "sframe-ratchet",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "RFC 9605 SFrame AEAD with epoch ratchet for browser group E2EE",
   "keywords": [
@@ -44,6 +44,10 @@
     "./kex-simple": {
       "import": "./dist/kex-simple.js",
       "types": "./dist/kex-simple.d.ts"
+    },
+    "./chat": {
+      "import": "./dist/chat/index.js",
+      "types": "./dist/chat/index.d.ts"
     }
   },
   "files": [
@@ -64,6 +68,7 @@
   "devDependencies": {
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
+    "fake-indexeddb": "^6.2.5",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"

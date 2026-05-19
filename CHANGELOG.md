@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-18
+
+### Added
+- `sframe-ratchet/chat` — new subpath export with high-level chat-mode provider for non-WebRTC messaging applications.
+  - `createChatProvider(opts)` — single-call factory returning `{ seal, unseal, rotate, dispose }`.
+  - **HKDF key derivation**: derives per-`(roomId, senderUid)` AES-128-GCM key + 12-byte salt from a caller-supplied HKDF base-key (usages: `deriveKey, deriveBits`). Salt = SHA-256(roomId) for room-scoped isolation; info strings include full `senderUid` for sender auth.
+  - **LRU key cache**: 256-entry per-provider cache (`KeyDerivationCache`); `rotate(roomId)` evicts all room entries.
+  - **CTR strategies**: `random-64` (default, 64-bit random, birthday bound ~2^32/sender) and `monotonic-idb` (IDB-backed atomic counter, multi-tab safe via `navigator.locks`, graceful fallback in Node.js).
+  - **KID encoding**: `epoch=0` (chat mode reserved), `peerIndex = SHA-256(senderUid)[0:2] & 0xFFFF` via existing `makeKid()`.
+  - **Replay protection**: sliding window (default 1024) per `(roomId, senderUid)`; `replayWindow: 0` disables.
+  - **`ReplayError`** class extending `SFrameError` with `code = 'REPLAY'`.
+  - README section "Chat-mode (non-WebRTC)" with threat-model table.
+
+### Threat model additions (v0.5)
+- **Defended**: AEAD confidentiality/integrity, in-session sender auth (via HKDF info), in-session replay, cross-room isolation.
+- **Not defended**: forward secrecy, post-compromise security, cross-session replay under `random-64`, traffic analysis.
+- **Explicitly documented**: symmetric AEAD — any room member can forge messages from any other member. Sign-then-encrypt is v0.6 roadmap.
+
+### No breaking changes
+- v0.4 consumers (WebRTC path) are unaffected — no changes to `sframe-ratchet` main barrel, `/worker`, or `/kex-simple`.
+- `getKey` contract change is **additive and subpath-only**: only applies to `sframe-ratchet/chat` consumers. The new contract requires HKDF base-key (usages: `deriveKey, deriveBits`) rather than AES-GCM key. v0.4 code does not import this subpath.
+
+### Dependencies
+- `fake-indexeddb` added as devDependency (test-only; not shipped in dist).
+
+
 ## [0.4.0] — 2026-05-14
 
 ### Performance
