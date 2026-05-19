@@ -321,3 +321,84 @@ Event kinds: `encrypt`, `decrypt`, `decrypt_fail` (carries error `code`), `ratch
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+---
+
+## Chat-mode (non-WebRTC)
+
+`sframe-ratchet/chat` is a high-level subpath export for text/binary messaging applications that don't use WebRTC tracks. Import it without touching the main barrel:
+
+```ts
+import { createChatProvider } from 'sframe-ratchet/chat';
+```
+
+### Quick start
+
+```ts
+// 1. Import a 32-byte shared secret as an HKDF base-key.
+//    In production, derive this out-of-band (X25519, MLS, etc.).
+const sharedSecret = new Uint8Array(32); // replace with real bytes
+const baseKey = await crypto.subtle.importKey(
+  'raw', sharedSecret, 'HKDF', false, ['deriveKey', 'deriveBits']
+);
+
+// 2. Create a provider (one per user session).
+const provider = createChatProvider({
+  getKey: async (roomId) => baseKey, // called once per (room, sender) pair, then cached
+});
+
+// 3. Seal a message.
+const plaintext = new TextEncoder().encode('hello!');
+const sealed = await provider.seal(plaintext, { roomId: 'room-abc', senderUid: 'alice' });
+
+// 4. Unseal (on the recipient side, with the same base key).
+const recovered = await provider.unseal(sealed, { roomId: 'room-abc', senderUid: 'alice' });
+
+// 5. Rotate on key change (clears derived-key cache + replay state for the room).
+provider.rotate('room-abc');
+```
+
+### CTR strategies
+
+| Strategy | Description | When to use |
+|---|---|---|
+| `random-64` (default) | 64-bit random CTR per frame; stateless | Most apps; no IDB dependency |
+| `monotonic-idb` | IDB-backed atomic counter; multi-tab safe via `navigator.locks` | When cross-session replay is a concern |
+
+```ts
+// monotonic-idb requires a keyspace string to namespace the IDB store:
+const provider = createChatProvider({
+  getKey: async (roomId) => baseKey,
+  ctrStrategy: 'monotonic-idb',
+  ctrKeyspace: 'my-app-v1',
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `getKey` | `(roomId) => Promise<CryptoKey>` | — | Required. Returns HKDF base-key with `['deriveKey','deriveBits']` usages. |
+| `ctrStrategy` | `'random-64' \| 'monotonic-idb'` | `'random-64'` | CTR allocation strategy. |
+| `ctrKeyspace` | `string` | — | Required when `ctrStrategy='monotonic-idb'`. |
+| `replayWindow` | `number` | `1024` | Recent CTR set size per sender per room. `0` disables replay protection. |
+| `onKeyRotated` | `(roomId: string) => void` | — | Called synchronously on `rotate(roomId)`. |
+
+### Threat model
+
+| Property | Status | Notes |
+|---|---|---|
+| Message confidentiality | Defended | AES-128-GCM AEAD over plaintext |
+| Message integrity | Defended | GCM authentication tag covers header + plaintext |
+| In-session sender auth | Defended | HKDF `info` contains full `senderUid`; key mismatch → AEAD fail |
+| In-session replay | Defended | Sliding window of 1024 CTRs per sender (default) |
+| Cross-room key reuse | Defended | HKDF salt = SHA-256(roomId); different rooms → different derived keys |
+| Forward secrecy | **Not defended** | One base key per room; compromise exposes history. Mitigate: rotate `getKey` periodically via SDK. |
+| Post-compromise security | **Not defended** | No MLS/double-ratchet in v0.5 |
+| Cross-session replay | **Not defended** (random-64) | Page reload clears in-memory replay set. Use `monotonic-idb` to persist state. |
+| Traffic analysis | **Not defended** | Message size/timing visible to transport |
+| **Sender deniability** | **Not defended — document loudly** | Symmetric AEAD: any room member holding the same base key can forge messages from any other member. Sign-then-encrypt is slated for v0.6. |
+
+### No sign-then-encrypt in v0.5
+
+v0.5 uses symmetric AEAD only. Any party that holds the room base key can forge a message attributed to any other sender. This is intentional in v0.5 to keep the audit surface small (+64 B overhead per frame and additional key management complexity for sign-then-encrypt). Non-repudiation / deniability guarantees are a v0.6 roadmap item.
