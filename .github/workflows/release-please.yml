@@ -1,0 +1,84 @@
+# Automated release via release-please + gated npm publish (OIDC Trusted Publishing).
+#
+# Flow: conventional commits on main -> release-please opens/updates the release PR
+# -> merging it bumps package.json + CHANGELOG, creates the tag + GitHub Release
+# -> the gated `publish` job runs in the SAME workflow (a GITHUB_TOKEN-created tag
+# cannot trigger a separate workflow) and publishes to npm with a short-lived OIDC
+# token — no long-lived NPM_TOKEN.
+#
+# One-time operator setup (two actions, both required before the first release):
+#   1. Repo must allow Actions to create PRs:
+#      gh api -X PUT repos/anatolykoptev/sframe-ratchet/actions/permissions/workflow \
+#        -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
+#   2. npmjs.com -> package "sframe-ratchet" -> Settings -> Trusted Publishing ->
+#      GitHub Actions -> org "anatolykoptev", repo "sframe-ratchet",
+#      workflow filename "release-please.yml" (exact, case-sensitive). Renaming this
+#      file breaks the binding and requires reconfiguring the Trusted Publisher.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # ---- Publish to npm, gated on a release actually being cut this run. ----
+  # OIDC Trusted Publishing: no NODE_AUTH_TOKEN, no registry-url — npm (>= 11.5.1)
+  # exchanges a short-lived OIDC token itself. Provenance is generated automatically.
+  # The npm Trusted Publisher must name THIS workflow file (release-please.yml).
+  publish:
+    name: Publish to npm
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Intentionally NO registry-url: it would write an .npmrc auth line and
+          # set NODE_AUTH_TOKEN, shadowing OIDC. Trusted publishing auto-detects.
+      - name: Upgrade npm to a version with OIDC trusted publishing (>= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify package.json version matches the release tag
+        env:
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          TAG_VERSION="${TAG_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          [ "$PKG_VERSION" = "$TAG_VERSION" ] || { echo "::error::version mismatch package.json=$PKG_VERSION tag=$TAG_VERSION"; exit 1; }
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Publish (OIDC — tokenless, provenance automatic)
+        env:
+          NODE_AUTH_TOKEN: ""   # guard: ensure no stale token shadows OIDC
+        run: npm publish
