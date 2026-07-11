@@ -252,3 +252,57 @@ onMetrics(worker, (ev) => {
 // Expose via a /metrics endpoint:
 // sframe_encrypt_total, sframe_decrypt_total, sframe_decrypt_fail_total, …
 ```
+
+## Receiver-epoch detection & recovery
+
+A receiver's worker starts at `currentEpoch = -1` and installs an epoch only when
+the main thread calls `FrameCryptor.setEpoch(...)` — which the app does after it
+receives and consumes the peer's `EpochAnnouncement`. If that announcement is
+never delivered (dropped signaling, a misrouted DataChannel), the worker stays at
+`-1` for the whole call: every inbound frame is queued in the bounded pre-epoch
+ring (`preEpochQueueCap`, default 50) and, once full, silently dropped. The
+main thread has no media, and — before v0.6 — no way to observe or recover it.
+
+Two first-class, always-emitted worker→main signals close that gap (independent
+of `metricsEnabled`):
+
+| Signal | Payload | Fired when | Main-thread surface |
+|--------|---------|-----------|---------------------|
+| `epoch_applied` | `epoch` | `installEpoch` advances `currentEpoch` | `FrameCryptor.getAppliedEpoch()`, `onEpochApplied(epoch)` |
+| `decrypt_starved` | `peerIndex?`, `framesDropped`, `sinceMs` | a frame is dropped at pre-epoch overflow (COALESCED, ≤1 per `STARVE_COALESCE_MS` per episode; reset on the next successful decode) | `onDecryptStarved(info)` |
+
+`peerIndex` is the in-payload SFrame-header hint (`splitKid(hdr.kid)` on the
+cleartext header) — never an RTP header extension. The signal is a stats-only
+liveness hint; key selection and AEAD are unchanged.
+
+Recovery wiring (consumer side):
+
+```ts
+const cryptor = new FrameCryptor({
+  worker, role: 'receiver', peerId: 'alice', peerIndex,
+  onDecryptStarved: ({ peerIndex, framesDropped, sinceMs }) => {
+    // No usable epoch installed and frames are being lost — ask the author to
+    // re-send the epoch (rewrapCurrentEpochFor) / re-run your key exchange.
+    requestEpochRepropagation(peerIndex);
+  },
+  onEpochApplied: (epoch) => {
+    // Recovered: the worker now has an active epoch.
+    clearRecoveryTimer();
+  },
+});
+
+// Or poll: a receiver still at -1 well after media started is stuck.
+if (cryptor.getAppliedEpoch() === -1 && Date.now() - callStart > 3000) {
+  requestEpochRepropagation();
+}
+```
+
+`RoomRatchet.getEpochPeerIndexMap(epoch)` returns the `peerIndexMap` for an
+installed epoch (defensive copy, or `null` if unknown/wiped) so recovery code can
+inspect membership without reaching into `ratchet.epochs` internals.
+
+> The SFrame KID carried in an RTP header extension (oxpulse-sfu-kit #42) could
+> let a receiver detect starvation before the payload arrives, but that channel
+> is dormant end-to-end today; consuming it is a documented follow-up. Detection
+> stays in-payload-only regardless (RFC 9605 §4.4: the receiver selects the key
+> from the in-payload SFrame header and lets AEAD fail closed on mismatch).

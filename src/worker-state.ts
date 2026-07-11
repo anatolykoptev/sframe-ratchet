@@ -12,6 +12,7 @@ import { emitMetric } from './metrics.ts';
 import { DEFAULT_CIPHER_SUITE } from './ratchet-crypto.ts';
 import {
 	GRACE_WINDOW_MS,
+	PRE_EPOCH_QUEUE_CAP,
 	type InMsg,
 	type OutMsg,
 	type PerSenderKeyBundle,
@@ -36,6 +37,13 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		sifTrailer: undefined,
 		ratchetWindowSize: 8,
 		metricsEnabled: false,
+		now: () => performance.now(),
+		preEpochQueueCap: PRE_EPOCH_QUEUE_CAP,
+		starveActive: false,
+		starveSinceMs: 0,
+		starveFramesDropped: 0,
+		starveLastEmitMs: 0,
+		starvePeerIndex: undefined,
 	};
 }
 
@@ -46,6 +54,9 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			state.peerId = msg.peerId;
 			state.selfPeerIndex = msg.peerIndex;
 			if (msg.suite !== undefined) state.suite = msg.suite;
+			if (msg.preEpochQueueCap !== undefined && Number.isFinite(msg.preEpochQueueCap) && msg.preEpochQueueCap > 0) {
+				state.preEpochQueueCap = Math.floor(msg.preEpochQueueCap);
+			}
 			state.emit({ type: 'ready' });
 			return;
 		case 'epoch':
@@ -103,6 +114,10 @@ export function installEpoch(
 		// M3.3 key-distribution protocol), so the stale-epoch gate at
 		// decodeFrame() is reachable on the receiver path.
 		scheduleWipeOfEpochsBelow(state, epoch);
+		// First-class recovery/observability signal: the receiver now has an
+		// active epoch. Always emitted (independent of metricsEnabled) so the
+		// main thread can observe recovery from a stuck currentEpoch === -1.
+		state.emit({ type: 'epoch_applied', epoch });
 		// Telemetry: epoch_advance. Only fires when a genuinely new epoch is
 		// installed (prevEpoch >= 0 means at least one epoch was already active).
 		if (prevEpoch >= 0) {

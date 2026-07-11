@@ -221,6 +221,17 @@ export class RoomRatchet {
 		return { ...this.epochs.get(this.currentEpoch)?.peerIndexMap ?? {} };
 	}
 
+	/**
+	 * Peer-index map for a SPECIFIC installed epoch. Returns null if the epoch is
+	 * unknown (never installed, or already wiped after the grace window). Returns a
+	 * defensive copy so callers cannot mutate internal state. Public accessor so
+	 * consumers stop narrow-casting into the private `epochs` map.
+	 */
+	getEpochPeerIndexMap(epoch: number): Record<string, PeerIndex> | null {
+		const state = this.epochs.get(epoch);
+		return state ? { ...state.peerIndexMap } : null;
+	}
+
 	/** Self's peer_index in the current epoch (undefined before first epoch). */
 	get selfPeerIndex(): PeerIndex | undefined {
 		return this.epochs.get(this.currentEpoch)?.selfPeerIndex;
