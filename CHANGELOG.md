@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.0...v0.5.1) (2026-07-11)
+
+
+### Added
+
+* receiver-epoch detection & recovery surface (v0.6.0) ([#8](https://github.com/anatolykoptev/sframe-ratchet/issues/8)) ([829232f](https://github.com/anatolykoptev/sframe-ratchet/commit/829232f4666f98ef907e77485ba72ef85145cc74)), closes [#7](https://github.com/anatolykoptev/sframe-ratchet/issues/7)
+
+
+### Fixed
+
+* correct release-please manifest baseline to 0.5.0 ([#6](https://github.com/anatolykoptev/sframe-ratchet/issues/6)) ([fa745b0](https://github.com/anatolykoptev/sframe-ratchet/commit/fa745b02aba1c002f25a84e34bef6dfcdcf4834d))
+
 ## [Unreleased]
 
 ### Added
