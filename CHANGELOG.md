@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Receiver-epoch detection & recovery surface** (additive; fixes a prod call-quality bug where a receiver's `FrameCryptor` stayed at `currentEpoch = -1` for a whole call — its `EpochAnnouncement` was never delivered — silently dropping every inbound frame into the bounded pre-epoch queue, with no way for the main thread to observe or recover it).
+  - `FrameCryptor.getAppliedEpoch(): number` — the epoch the worker has installed/activated (`-1` until the first). A receiver still at `-1` after media has started is starved.
+  - `FrameCryptorOptions.onEpochApplied?(epoch)` — fires when the worker installs/activates a new epoch (worker→main `epoch_applied` signal); lets the app observe recovery ("receiver installed epoch N").
+  - `FrameCryptorOptions.onDecryptStarved?(info)` — fires (COALESCED, at most once per `STARVE_COALESCE_MS` per episode) when the receiver is dropping inbound frames for lack of a usable installed epoch, so the app can re-propagate / request the epoch. Promotes the existing `pre_epoch_full` / `queue_overflow` drop points to a first-class recovery signal. New `DecryptStarvedInfo` type (`{ peerIndex?, framesDropped, sinceMs }`).
+  - `RoomRatchet.getEpochPeerIndexMap(epoch): Record<string, PeerIndex> | null` — public accessor for an installed epoch's `peerIndexMap` (defensive copy), so consumers stop narrow-casting into `ratchet.epochs` internals.
+  - `FrameCryptorOptions.preEpochQueueCap?` — optional tuning override for the worker's pre-epoch frame-queue cap (default 50; a tuning value, not a security parameter).
+
+### Security invariants (unchanged)
+- The new surface exposes epoch NUMBERS and drop STATS only — no key material, chain keys, or `CryptoKey` bytes cross it. Keys stay non-extractable and worker-resident.
+- Detection is IN-PAYLOAD-ONLY: `peerIndex` comes from the cleartext SFrame header (`splitKid(kid)`), never from an RTP header extension. AEAD fail-closed, the stale-epoch gate, the ratchet window, and the grace wipe are untouched. All NIST CAVP vectors and strict-FIPS behaviour preserved.
+
+### Follow-ups
+- Optional consumption of the SFrame KID delivered via RTP header extension (oxpulse-sfu-kit #42) as an earlier starvation hint is deferred: the channel is dormant end-to-end today (no SFU/sender writes it), so it adds nothing until wired. Recovery stays in-payload-only regardless (RFC 9605: key selection is payload-authoritative, AEAD fail-closed on mismatch).
+
 ## [0.5.0] — 2026-05-18
 
 ### Added

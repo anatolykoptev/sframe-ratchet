@@ -206,6 +206,37 @@ await cryptor.setEpoch({
 
 The smoke test at [`src/__tests__/sframe.smoke.test.ts`](./src/__tests__/sframe.smoke.test.ts) is the most accurate working example of the AEAD path.
 
+### Detecting and recovering a stuck receiver
+
+A receiver's worker sits at `currentEpoch = -1` until `setEpoch` installs the first
+epoch — which only happens after the app receives the peer's `EpochAnnouncement`. If
+that announcement is never delivered, the worker drops every inbound frame into its
+bounded pre-epoch queue with no media and (before v0.6) no way to observe it. The
+`FrameCryptor` now surfaces two always-on signals so the app can detect and recover:
+
+```ts
+const cryptor = new FrameCryptor({
+  worker, role: 'receiver', peerId: 'alice', peerIndex,
+  // Fires (coalesced) while inbound frames are being dropped for lack of an epoch.
+  onDecryptStarved: ({ peerIndex, framesDropped, sinceMs }) => {
+    requestEpochRepropagation(peerIndex);   // re-run KEX / ask the author to re-send
+  },
+  // Fires when the worker installs/activates an epoch — i.e. recovery succeeded.
+  onEpochApplied: (epoch) => clearRecoveryTimer(),
+});
+
+// Or poll: still at -1 well after media started ⇒ stuck.
+if (cryptor.getAppliedEpoch() === -1 && Date.now() - callStart > 3000) {
+  requestEpochRepropagation();
+}
+```
+
+`RoomRatchet.getEpochPeerIndexMap(epoch)` returns an installed epoch's `peerIndexMap`
+(defensive copy, or `null` if unknown) so recovery code can inspect membership without
+reaching into ratchet internals. The signals expose epoch **numbers** and drop
+**stats** only — never key material — and detection is in-payload-only (the `peerIndex`
+hint comes from the cleartext SFrame header, not an RTP header extension).
+
 ## Architecture
 
 ```
@@ -235,8 +266,8 @@ The barrel at [`src/index.ts`](./src/index.ts) exports the following public API.
 
 | Export | Description |
 |--------|-------------|
-| `RoomRatchet` | Per-room epoch ratchet. Mint and consume `EpochAnnouncement`s, look up per-sender keys, rotate on membership change. |
-| `FrameCryptor` | Main-thread glue between an `RTCRtpSender` / `RTCRtpReceiver` and the worker. |
+| `RoomRatchet` | Per-room epoch ratchet. Mint and consume `EpochAnnouncement`s, look up per-sender keys, rotate on membership change, read an epoch's `peerIndexMap` (`getEpochPeerIndexMap`). |
+| `FrameCryptor` | Main-thread glue between an `RTCRtpSender` / `RTCRtpReceiver` and the worker. `getAppliedEpoch()` + the `onEpochApplied` / `onDecryptStarved` options expose receiver-epoch detection & recovery. |
 
 ### SFrame AEAD
 
@@ -270,7 +301,7 @@ The barrel at [`src/index.ts`](./src/index.ts) exports the following public API.
 
 ### Types
 
-`EpochAnnouncement`, `EpochKey`, `IdentityKeyPair`, `MemberChange`, `PeerIdentity`, `PeerIndex`, `SFrameError`, `SFrameKey`, `SFrameKeyLookup`, `SFrameKeyResolver`, `SFrameSupport`, `SFrameHeader`, `RoomRatchetOptions`, `FrameCryptorOptions`, `EpochParams`, `PeerIndexMapValidation`.
+`EpochAnnouncement`, `EpochKey`, `IdentityKeyPair`, `MemberChange`, `PeerIdentity`, `PeerIndex`, `SFrameError`, `SFrameKey`, `SFrameKeyLookup`, `SFrameKeyResolver`, `SFrameSupport`, `SFrameHeader`, `RoomRatchetOptions`, `FrameCryptorOptions`, `EpochParams`, `DecryptStarvedInfo`, `PeerIndexMapValidation`.
 
 ### Constants
 

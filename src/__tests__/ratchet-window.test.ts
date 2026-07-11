@@ -92,7 +92,7 @@ describe('ratchet window — 1-step advance', () => {
 		await decodeFrame(receiver, frame);
 		const decoded = new Uint8Array(frame.data);
 		expect(decoded).toEqual(plaintext);
-		expect(errors).toHaveLength(0);
+		expect(errors.filter((m) => m.type === 'decrypt_failure')).toHaveLength(0);
 	});
 
 	it('decrypts when receiver has MISSED a key advance — sender is at step 1, receiver at step 0', async () => {
@@ -128,7 +128,7 @@ describe('ratchet window — 1-step advance', () => {
 		await decodeFrame(receiver, frame);
 		const decoded = new Uint8Array(frame.data);
 		expect(decoded).toEqual(plaintext);
-		expect(errors).toHaveLength(0);
+		expect(errors.filter((m) => m.type === 'decrypt_failure')).toHaveLength(0);
 
 		// Receiver's cached key should now be at step 1.
 		const entry = receiver.epochs.get(epoch);
@@ -175,7 +175,7 @@ describe('ratchet window — 3-step advance + caching', () => {
 		// First frame at step 3: receiver retries 1, 2, 3 before succeeding.
 		await decodeFrame(receiver, frame1);
 		expect(new Uint8Array(frame1.data)).toEqual(plaintext1);
-		expect(errors).toHaveLength(0);
+		expect(errors.filter((m) => m.type === 'decrypt_failure')).toHaveLength(0);
 
 		// Cached step should now be 3.
 		const entry = receiver.epochs.get(epoch);
@@ -187,7 +187,7 @@ describe('ratchet window — 3-step advance + caching', () => {
 		const frame2 = makeFrame(ct2);
 		await decodeFrame(receiver, frame2);
 		expect(new Uint8Array(frame2.data)).toEqual(plaintext2);
-		expect(errors).toHaveLength(0);
+		expect(errors.filter((m) => m.type === 'decrypt_failure')).toHaveLength(0);
 		// Step cursor unchanged — still 3.
 		expect(entry!.ratchetSteps.get(senderPeerIndex)).toBe(3);
 	});

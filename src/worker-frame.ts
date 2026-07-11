@@ -13,7 +13,7 @@ import { parseHeader, serializeHeader } from './sframe-header.ts';
 import { sframeDecrypt, sframeEncrypt, sframeEncryptInto } from './sframe.ts';
 import { splitKid } from './ratchet-ids.ts';
 import { deriveNextSenderKey } from './ratchet-crypto.ts';
-import { PRE_EPOCH_QUEUE_CAP, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
+import { STARVE_COALESCE_MS, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
@@ -278,7 +278,7 @@ export async function decodeFrame(
 		// M3.4 deferred — multi-epoch races during rotation surface as
 		// decrypt_failed (not re-queued); distinguish via reason field in events.
 		if (state.currentEpoch === -1) {
-			enqueuePreEpoch(state, frame);
+			enqueuePreEpoch(state, frame, peerIndex);
 			return; // not an error from caller's perspective
 		}
 
@@ -289,6 +289,8 @@ export async function decodeFrame(
 		plaintext.set(prefix, 0);
 		plaintext.set(opened, N);
 		frame.data = toExclusiveArrayBuffer(plaintext);
+		// A frame decoded — the receiver is healthy; end any starvation episode.
+		clearStarve(state);
 		emitMetric(state, { kind: 'decrypt', epoch, peerIndex, bytes: plaintext.byteLength });
 	} catch (err) {
 		// StaleEpochError already emitted its decrypt_failure event above.
@@ -331,14 +333,59 @@ export async function decodeFrame(
 function pushToQueue(
 	state: WorkerState,
 	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+	peerIndex?: PeerIndex,
 ): void {
-	if (state.preEpochQueue.length >= PRE_EPOCH_QUEUE_CAP) {
+	if (state.preEpochQueue.length >= state.preEpochQueueCap) {
 		// Drop oldest (FIFO ring — shift the front).
 		state.preEpochQueue.shift();
 		state.emit({ type: 'decrypt_failure', reason: 'queue_overflow' });
 		emitMetric(state, { kind: 'queue_drop', reason: 'pre_epoch_full' });
+		// Promote the drop to a first-class, coalesced recovery signal.
+		noteStarveDrop(state, peerIndex);
 	}
 	state.preEpochQueue.push({ frame });
+}
+
+/**
+ * Note a frame dropped at pre-epoch overflow as part of a starvation episode
+ * and emit a COALESCED `decrypt_starved` signal. Emits immediately on the first
+ * drop of an episode (so recovery can start), then at most once per
+ * STARVE_COALESCE_MS. `framesDropped` is cumulative for the episode; `sinceMs`
+ * is elapsed time since the first drop. Reset by clearStarve() on the next
+ * successful decode. `peerIndex` is the in-payload SFrame-header hint only.
+ */
+function noteStarveDrop(state: WorkerState, peerIndex?: PeerIndex): void {
+	const now = state.now();
+	if (!state.starveActive) {
+		state.starveActive = true;
+		state.starveSinceMs = now;
+		state.starveFramesDropped = 1;
+		state.starveLastEmitMs = now;
+		state.starvePeerIndex = peerIndex;
+		state.emit({ type: 'decrypt_starved', peerIndex, framesDropped: 1, sinceMs: 0 });
+		return;
+	}
+	state.starveFramesDropped += 1;
+	if (peerIndex !== undefined) state.starvePeerIndex = peerIndex;
+	if (now - state.starveLastEmitMs >= STARVE_COALESCE_MS) {
+		state.starveLastEmitMs = now;
+		state.emit({
+			type: 'decrypt_starved',
+			peerIndex: state.starvePeerIndex,
+			framesDropped: state.starveFramesDropped,
+			sinceMs: now - state.starveSinceMs,
+		});
+	}
+}
+
+/** End the current starvation episode — a frame decoded successfully. */
+function clearStarve(state: WorkerState): void {
+	if (!state.starveActive) return;
+	state.starveActive = false;
+	state.starveSinceMs = 0;
+	state.starveFramesDropped = 0;
+	state.starveLastEmitMs = 0;
+	state.starvePeerIndex = undefined;
 }
 
 /**
@@ -348,8 +395,9 @@ function pushToQueue(
 function enqueuePreEpoch(
 	state: WorkerState,
 	frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+	peerIndex?: PeerIndex,
 ): void {
-	pushToQueue(state, frame);
+	pushToQueue(state, frame, peerIndex);
 }
 
 /**
@@ -393,7 +441,7 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				if (!key) {
 					// Still no key for this epoch — re-enqueue via pushToQueue (enforces
 					// cap). Will be retried when the correct epoch's installEpoch fires.
-					pushToQueue(state, frame);
+					pushToQueue(state, frame, peerIndex);
 					continue;
 				}
 				// Use the ratchet retry helper so that within-epoch key advances are
@@ -405,6 +453,8 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				plaintext.set(prefix, 0);
 				plaintext.set(opened, N);
 				frame.data = toExclusiveArrayBuffer(plaintext);
+				// Drained a frame — starvation (if any) has ended.
+				clearStarve(state);
 			} catch (err) {
 				// Decrypt error on retry — emit observability event (CLAUDE.md: no silent errors).
 				const detail = err instanceof Error ? err.message : String(err);

@@ -32,7 +32,7 @@ export interface PerSenderKeyBundle {
 	rawKey: Uint8Array;
 }
 
-export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite }
+export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite; preEpochQueueCap?: number }
 export interface EpochMsg {
 	type: 'epoch';
 	epoch: number;
@@ -88,7 +88,22 @@ export type OutMsg =
 	| { type: 'ready' }
 	| { type: 'metrics'; event: MetricsEvent }
 	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch';
-		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string };
+		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string }
+	/**
+	 * Receiver installed/activated a new epoch (currentEpoch advanced). First-class
+	 * control signal — always emitted, independent of `metricsEnabled`. The main
+	 * thread mirrors it via `FrameCryptor.getAppliedEpoch()` / `onEpochApplied`.
+	 */
+	| { type: 'epoch_applied'; epoch: number }
+	/**
+	 * Receiver is DROPPING inbound frames because no usable epoch key is installed
+	 * (queue-overflow at the bounded pre-epoch ring). A first-class RECOVERY signal
+	 * derived from the pre_epoch_full/queue_overflow drop points — always emitted,
+	 * COALESCED to at most one per `STARVE_COALESCE_MS` per episode. `peerIndex` is
+	 * the in-payload SFrame-header hint (never an RTP header extension); `sinceMs`
+	 * is elapsed time since the episode's first drop; `framesDropped` is cumulative.
+	 */
+	| { type: 'decrypt_starved'; peerIndex?: number; framesDropped: number; sinceMs: number };
 
 /** Bounded pre-epoch frame queue entry (M3.5 first-peer epoch race fix). */
 export interface QueuedFrame {
@@ -156,6 +171,29 @@ export interface WorkerState {
 	 * Disabled by default to keep the hot path zero-cost.
 	 */
 	metricsEnabled: boolean;
+	/**
+	 * Injectable monotonic clock (ms). Defaults to `Date.now`. Used only for the
+	 * starvation-signal coalescing window; injectable so tests can drive it.
+	 */
+	now: () => number;
+	/**
+	 * Pre-epoch ring-buffer cap. A tuning value (NOT a security parameter);
+	 * defaults to `PRE_EPOCH_QUEUE_CAP`. Overridable via the init message.
+	 */
+	preEpochQueueCap: number;
+	/** True while a starvation episode (queue-overflow drops at no/wrong epoch) is ongoing. */
+	starveActive: boolean;
+	/** `state.now()` at the first drop of the current starvation episode. */
+	starveSinceMs: number;
+	/** Cumulative dropped-frame count within the current starvation episode. */
+	starveFramesDropped: number;
+	/** `state.now()` of the last emitted `decrypt_starved` (drives coalescing). */
+	starveLastEmitMs: number;
+	/** Last peer_index seen on a dropped frame (in-payload KID hint; may be undefined). */
+	starvePeerIndex?: PeerIndex;
 }
 
 export const GRACE_WINDOW_MS = 2000;
+
+/** Coalesce window (ms) for `decrypt_starved` — at most one emit per window per episode. */
+export const STARVE_COALESCE_MS = 1000;

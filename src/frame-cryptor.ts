@@ -26,6 +26,34 @@ export interface FrameCryptorOptions {
 	 * All members of a room MUST use the same suite.
 	 */
 	suite?: CipherSuite;
+	/**
+	 * Fires when the worker installs/activates a new epoch (currentEpoch advances).
+	 * Lets the app observe "receiver installed epoch N" — the recovery counterpart
+	 * to a receiver stuck at getAppliedEpoch() === -1. Epoch NUMBERS only, no keys.
+	 */
+	onEpochApplied?: (epoch: number) => void;
+	/**
+	 * Fires (COALESCED) when the receiver is DROPPING inbound frames for lack of a
+	 * usable installed epoch — a first-class recovery signal so the app can
+	 * re-propagate / request the epoch. Drop STATS only; never key material.
+	 */
+	onDecryptStarved?: (info: DecryptStarvedInfo) => void;
+	/**
+	 * Optional override for the worker's pre-epoch frame-queue cap. A TUNING value
+	 * (NOT a security parameter); defaults to 50. Larger = more buffering before
+	 * frames are dropped during the pre-epoch window.
+	 */
+	preEpochQueueCap?: number;
+}
+
+/** Payload for {@link FrameCryptorOptions.onDecryptStarved}. Stats only — no key material. */
+export interface DecryptStarvedInfo {
+	/** In-payload SFrame-header peer_index hint for the starved sender (if parsed). */
+	peerIndex?: number;
+	/** Cumulative frames dropped in the current starvation episode. */
+	framesDropped: number;
+	/** Elapsed milliseconds since the first drop of the current episode. */
+	sinceMs: number;
 }
 
 /** Parameters for setEpoch — post-revision per-epoch key install. */
@@ -84,6 +112,13 @@ export class FrameCryptor {
 	/** True when the browser lacks both RTCRtpScriptTransform and
 	 *  createEncodedStreams — SFrame transforms cannot be installed. */
 	readonly transitOnly: boolean;
+	private readonly onEpochAppliedCb?: (epoch: number) => void;
+	private readonly onDecryptStarvedCb?: (info: DecryptStarvedInfo) => void;
+	private readonly preEpochQueueCap?: number;
+	/** Last epoch the worker confirmed it applied; -1 until the first epoch_applied. */
+	private appliedEpoch = -1;
+	/** Bound worker→main message listener; removed in detach(). null when absent. */
+	private workerListener: ((ev: MessageEvent) => void) | null = null;
 
 	constructor(opts: FrameCryptorOptions) {
 		this.worker = opts.worker;
@@ -92,8 +127,50 @@ export class FrameCryptor {
 		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
 		assertSuiteAllowed(this.suite);
 		this.currentPeerIndex = opts.peerIndex;
+		this.onEpochAppliedCb = opts.onEpochApplied;
+		this.onDecryptStarvedCb = opts.onDecryptStarved;
+		this.preEpochQueueCap = opts.preEpochQueueCap;
 		const { native, fallback } = supportsSFrame();
 		this.transitOnly = !native && !fallback;
+		this.installWorkerListener();
+	}
+
+	/**
+	 * Subscribe to worker → main control signals (epoch_applied / decrypt_starved).
+	 * Guarded on addEventListener presence so the transit-only unit mocks (plain
+	 * objects without addEventListener) are unaffected. Removed in detach().
+	 */
+	private installWorkerListener(): void {
+		const w = this.worker as unknown as {
+			addEventListener?: (t: 'message', l: (ev: MessageEvent) => void) => void;
+		};
+		if (typeof w.addEventListener !== 'function') return;
+		const listener = (ev: MessageEvent): void => this.handleWorkerMessage(ev);
+		this.workerListener = listener;
+		w.addEventListener('message', listener);
+	}
+
+	private handleWorkerMessage(ev: MessageEvent): void {
+		const data = ev.data as { type?: string } | undefined;
+		if (!data) return;
+		if (data.type === 'epoch_applied') {
+			const { epoch } = data as { epoch: number };
+			this.appliedEpoch = epoch;
+			this.onEpochAppliedCb?.(epoch);
+		} else if (data.type === 'decrypt_starved') {
+			const d = data as { peerIndex?: number; framesDropped: number; sinceMs: number };
+			this.onDecryptStarvedCb?.({ peerIndex: d.peerIndex, framesDropped: d.framesDropped, sinceMs: d.sinceMs });
+		}
+	}
+
+	/**
+	 * The epoch the worker has most recently installed/activated, as observed via
+	 * the `epoch_applied` signal. Returns -1 until the first epoch is applied — a
+	 * receiver still at -1 after media has started is starved (see onDecryptStarved).
+	 * Epoch NUMBER only; exposes no key material.
+	 */
+	getAppliedEpoch(): number {
+		return this.appliedEpoch;
 	}
 
 	private ensureInit(): void {
@@ -101,6 +178,7 @@ export class FrameCryptor {
 		this.worker.postMessage({
 			type: 'init', role: this.role, peerId: this.peerId,
 			peerIndex: this.currentPeerIndex, suite: this.suite,
+			preEpochQueueCap: this.preEpochQueueCap,
 		});
 		this.initialised = true;
 	}
@@ -233,6 +311,13 @@ export class FrameCryptor {
 	detach(): void {
 		for (const fn of this.attached) fn();
 		this.attached = [];
+		if (this.workerListener) {
+			const w = this.worker as unknown as {
+				removeEventListener?: (t: 'message', l: (ev: MessageEvent) => void) => void;
+			};
+			w.removeEventListener?.('message', this.workerListener);
+			this.workerListener = null;
+		}
 		if (this.initialised) {
 			this.worker.postMessage({ type: 'teardown' });
 			this.initialised = false;
