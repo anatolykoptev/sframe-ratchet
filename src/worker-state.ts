@@ -37,7 +37,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		sifTrailer: undefined,
 		ratchetWindowSize: 8,
 		metricsEnabled: false,
-		now: Date.now,
+		now: () => performance.now(),
 		preEpochQueueCap: PRE_EPOCH_QUEUE_CAP,
 		starveActive: false,
 		starveSinceMs: 0,

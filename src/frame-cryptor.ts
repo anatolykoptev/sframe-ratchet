@@ -150,16 +150,28 @@ export class FrameCryptor {
 		w.addEventListener('message', listener);
 	}
 
+	/**
+	 * Worker messages are same-origin, trusted-boundary (our own worker script,
+	 * not attacker-controlled input) — but the shape guard below is essentially
+	 * free and defends against a future worker-side field-shape regression.
+	 */
 	private handleWorkerMessage(ev: MessageEvent): void {
 		const data = ev.data as { type?: string } | undefined;
 		if (!data) return;
 		if (data.type === 'epoch_applied') {
-			const { epoch } = data as { epoch: number };
+			const { epoch } = data as { epoch: unknown };
+			if (typeof epoch !== 'number') return;
 			this.appliedEpoch = epoch;
 			this.onEpochAppliedCb?.(epoch);
 		} else if (data.type === 'decrypt_starved') {
-			const d = data as { peerIndex?: number; framesDropped: number; sinceMs: number };
-			this.onDecryptStarvedCb?.({ peerIndex: d.peerIndex, framesDropped: d.framesDropped, sinceMs: d.sinceMs });
+			const d = data as { peerIndex?: unknown; framesDropped?: unknown; sinceMs?: unknown };
+			if (typeof d.framesDropped !== 'number' || typeof d.sinceMs !== 'number') return;
+			if (d.peerIndex !== undefined && typeof d.peerIndex !== 'number') return;
+			this.onDecryptStarvedCb?.({
+				peerIndex: d.peerIndex as number | undefined,
+				framesDropped: d.framesDropped,
+				sinceMs: d.sinceMs,
+			});
 		}
 	}
 

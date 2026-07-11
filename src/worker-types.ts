@@ -172,8 +172,11 @@ export interface WorkerState {
 	 */
 	metricsEnabled: boolean;
 	/**
-	 * Injectable monotonic clock (ms). Defaults to `Date.now`. Used only for the
-	 * starvation-signal coalescing window; injectable so tests can drive it.
+	 * Injectable monotonic clock (ms). Defaults to `performance.now()` — a true
+	 * monotonic clock, unlike `Date.now()` (which can jump backward on an NTP
+	 * correction, suppressing a coalesced emit, or forward, emitting early).
+	 * Used only for the starvation-signal coalescing window (observability
+	 * timing, not a security boundary); injectable so tests can drive it.
 	 */
 	now: () => number;
 	/**

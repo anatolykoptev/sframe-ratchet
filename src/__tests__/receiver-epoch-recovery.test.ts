@@ -265,6 +265,21 @@ describe('C. RoomRatchet.getEpochPeerIndexMap', () => {
 		(m as Record<string, number>).aaa = 999;
 		expect(r.getEpochPeerIndexMap(0)).toEqual({ aaa: 0, bbb: 1 });
 	});
+
+	// Contract lock: getEpochPeerIndexMap must NEVER leak key material even if a
+	// future field is added to the internal EpochState (chainKey, keys, etc). This
+	// pins the "epoch NUMBERS and peer_index map only" surface for a crypto lib.
+	it('contract lock: result carries no key-material own-properties', async () => {
+		const r = new RoomRatchet({ identity: PEER_SELF as never, initialPeers: [PEER_B as never] });
+		await installRatchet(r, 0);
+		const m = r.getEpochPeerIndexMap(0);
+		expect(m).not.toBeNull();
+		for (const forbidden of ['chainKey', 'keys', 'cryptoKey', 'salt', 'rawKey']) {
+			expect(Object.prototype.hasOwnProperty.call(m, forbidden)).toBe(false);
+		}
+		// Positive control: the map DOES carry the peer_id -> peer_index entries.
+		expect(Object.keys(m as Record<string, number>).sort()).toEqual(['aaa', 'bbb']);
+	});
 });
 
 // -----------------------------------------------------------------------------
