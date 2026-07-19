@@ -20,7 +20,7 @@
 //   - No new key material exposed — SAS bytes are a derivation, not a key.
 //   - No timing-safe comparison needed in this layer (users compare visually).
 
-import { toArrayBuffer as asArrayBuffer } from './internal/buffer.js';
+import { hkdfExtractExpand } from './ratchet-crypto.js';
 
 // ---- Types ----------------------------------------------------------------
 
@@ -139,7 +139,8 @@ export const SAS_EMOJI_TABLE: readonly EmojiEntry[] = [
 /**
  * Derive 6 SAS bytes from the DH shared secret via HKDF-SHA-256.
  *
- * Uses WebCrypto HKDF with:
+ * Delegates to the shared `hkdfExtractExpand` helper from ratchet-crypto.ts
+ * (same HKDF used for wrap keys, sender keys, ratchet-step keys) with:
  *   - hash: SHA-256
  *   - ikm:  dhSecret (the SAME X25519 shared secret used to wrap the ChainKey)
  *   - salt: empty (consistent with the rest of the ratchet)
@@ -152,20 +153,7 @@ export const SAS_EMOJI_TABLE: readonly EmojiEntry[] = [
  * computeSas.
  */
 export async function deriveSasBytes(dhSecret: Uint8Array): Promise<Uint8Array> {
-	const material = await crypto.subtle.importKey(
-		'raw', asArrayBuffer(dhSecret), 'HKDF', false, ['deriveBits'],
-	);
-	const bits = await crypto.subtle.deriveBits(
-		{
-			name: 'HKDF',
-			hash: 'SHA-256',
-			salt: new ArrayBuffer(0),
-			info: asArrayBuffer(SAS_INFO),
-		},
-		material,
-		SAS_BYTES_LENGTH * 8,
-	);
-	return new Uint8Array(bits);
+	return hkdfExtractExpand(dhSecret, SAS_INFO, SAS_BYTES_LENGTH, 'SHA-256');
 }
 
 // ---- Decimal SAS ----------------------------------------------------------

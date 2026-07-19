@@ -98,6 +98,7 @@ export {
 	deriveSenderKeys,
 	deriveEpochKeyTable,
 	deriveWrapKey,
+	hkdfExtractExpand,
 	randomChainKey,
 	generateX25519Keypair,
 	x25519Dh,
@@ -121,7 +122,10 @@ export { DEFAULT_SIF_TRAILER, getDefaultSifTrailer } from './sif-trailer.js';
 export type { SetSifTrailerMsg, SetReplayWindowMsg, SetFailureToleranceMsg } from './worker-types.js';
 
 // ---- Anti-replay sliding window (RFC 9605 §9.3) --------------------------
-export { MediaReplayWindow } from './replay.js';
+// MediaReplayWindow is a re-export of SlidingReplayWindow from chat/replay.ts —
+// the same bounded-set + FIFO queue sliding window is used for both media and
+// chat frames. The alias preserves the public API name for media consumers.
+export { SlidingReplayWindow as MediaReplayWindow } from './chat/replay.js';
 
 // ---- Telemetry / observability --------------------------------------------
 export type { MetricsEvent } from './worker-types.js';
