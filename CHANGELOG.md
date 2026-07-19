@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.1...v0.5.2) (2026-07-19)
+
+
+### Added
+
+* anti-replay sliding window for media frames ([#10](https://github.com/anatolykoptev/sframe-ratchet/issues/10)) ([70295b6](https://github.com/anatolykoptev/sframe-ratchet/commit/70295b66a20bf28a6ac9a296c40d0a42a8b871b9))
+* anti-replay sliding window for media frames (RFC 9605 §9.3, [#10](https://github.com/anatolykoptev/sframe-ratchet/issues/10)) ([#17](https://github.com/anatolykoptev/sframe-ratchet/issues/17)) ([52fe4ba](https://github.com/anatolykoptev/sframe-ratchet/commit/52fe4ba6b0cfbb3e07dd37a32487c8dd4bbdc8e3))
+* concurrent ratchet dedup ([#15](https://github.com/anatolykoptev/sframe-ratchet/issues/15)) ([c2c5974](https://github.com/anatolykoptev/sframe-ratchet/commit/c2c59745ee80ead65b87dbb2b631ee5b8745f08f))
+* decryption-failure-driven key invalidation ([#14](https://github.com/anatolykoptev/sframe-ratchet/issues/14)) ([6912c86](https://github.com/anatolykoptev/sframe-ratchet/commit/6912c8645ac9f6bc706bdb7cb53a853b539eff14))
+* MLS adapter — ts-mls → FrameCryptor.setEpoch direct delivery ([#28](https://github.com/anatolykoptev/sframe-ratchet/issues/28)) ([02f58bb](https://github.com/anatolykoptev/sframe-ratchet/commit/02f58bb31db365829b1fc98433e5add12ac0886e))
+* RFC 9605 §5.2 MLS Key ID format ([#12](https://github.com/anatolykoptev/sframe-ratchet/issues/12)) ([bd779f9](https://github.com/anatolykoptev/sframe-ratchet/commit/bd779f923ad8b5e470300fe2b731d1eabbd6eec0))
+* SAS key verification for MITM detection ([#11](https://github.com/anatolykoptev/sframe-ratchet/issues/11)) ([7e50d6d](https://github.com/anatolykoptev/sframe-ratchet/commit/7e50d6dc0a76bff882051f413dd383f5be62b42b))
+
+
+### Fixed
+
+* **ci:** pin @noble/ciphers to 2.1.1 to match ts-mls peer dep ([d8fbed7](https://github.com/anatolykoptev/sframe-ratchet/commit/d8fbed7aa72986a7c3bc9fbc6fa0a1ddcc7423b8))
+* **ci:** pin @noble/curves and @noble/hashes to 2.0.1 (ts-mls peer deps) ([4374a92](https://github.com/anatolykoptev/sframe-ratchet/commit/4374a922d100a0b5c68ecfc4d5588ab56c5b139c))
+* repo-review-council bugs [#29](https://github.com/anatolykoptev/sframe-ratchet/issues/29)-[#34](https://github.com/anatolykoptev/sframe-ratchet/issues/34) + dedup ([#35](https://github.com/anatolykoptev/sframe-ratchet/issues/35)) ([266f038](https://github.com/anatolykoptev/sframe-ratchet/commit/266f0387243c6bf2fc1eaff27d3c9446a1701218))
+
+
+### Changed
+
+* deduplicate MediaReplayWindow and SAS HKDF ([#24](https://github.com/anatolykoptev/sframe-ratchet/issues/24), [#25](https://github.com/anatolykoptev/sframe-ratchet/issues/25)) ([#27](https://github.com/anatolykoptev/sframe-ratchet/issues/27)) ([ebba8ab](https://github.com/anatolykoptev/sframe-ratchet/commit/ebba8abe857a273a27034442e2654013f1525c4e))
+
+
+### Documentation
+
+* mark all completed roadmap items as DONE + add nightly fuzz CI ([ddb26cd](https://github.com/anatolykoptev/sframe-ratchet/commit/ddb26cdaa85ded7cb8f282cac70a795302212fac))
+* mark MLS adapter as DONE in ROADMAP ([9af8d51](https://github.com/anatolykoptev/sframe-ratchet/commit/9af8d51c3f6d3baf1ff8048edb5c04075a9a67d5))
+* **roadmap:** add competitor-recon gaps ([#10](https://github.com/anatolykoptev/sframe-ratchet/issues/10)-[#16](https://github.com/anatolykoptev/sframe-ratchet/issues/16)) ([68449ee](https://github.com/anatolykoptev/sframe-ratchet/commit/68449ee2e6964c0ea822b8ddd85a07cda1450f00))
+
 ## [0.5.1](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.0...v0.5.1) (2026-07-11)
 
 
