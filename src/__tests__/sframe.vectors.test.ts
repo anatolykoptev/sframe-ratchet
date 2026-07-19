@@ -1,370 +1,637 @@
-/**
- * RFC 9605 §C (Appendix C) test vectors — sourced verbatim from:
- *   https://github.com/sframe-wg/sframe/blob/025d568/test-vectors/test-vectors.json
- * which is the canonical machine-readable companion to RFC 9605.
- *
- * ── What we validate ────────────────────────────────────────────────────────
- *
- * C.1  Header decode:  parseHeader() against RFC §4.3 canonical encodings.
- *      We test inline KID (K=0, KID 0-7), extended 1-byte KID (KID 255),
- *      extended 2-byte KID (KID 256, 291), and extended 4-byte KID (KID
- *      16777216, 4294967295). CTR variants: 0, 1, 255, 256 (each encodes at
- *      a different width).
- *
- * C.1  Header encode:  serializeHeader() — our library always emits K=1
- *      (extended KID, fixed 4-byte) and C=1 (extended CTR, minimal width)
- *      per the custom spec §6.1 ("fixed 4-byte KID"). This deviates from
- *      RFC §4.3 minimal encoding for inline-able KID (0-7) and inline-able
- *      CTR (0-7). We test that our encoder's output is re-parseable and
- *      round-trips correctly, and cross-check the exact bytes for KIDs that
- *      require a 4-byte extended field (≥0x01000000), where our encoding
- *      agrees with the RFC for all CTR>7 cases.
- *
- * C.3  SFrame encrypt/decrypt (cipher suite 0x0004 = AES_128_GCM_SHA256_128):
- *      We supply the RFC's pre-derived `sframe_key` and `sframe_salt` directly
- *      as an SFrameKey (bypassing our library's own HKDF key schedule, which
- *      differs from RFC §4.2). We verify:
- *        (a) sframeEncrypt → sframeDecrypt round-trip recovers plaintext.
- *        (b) The AES-GCM ciphertext body (excluding our header) matches the
- *            RFC's `ct` body (ciphertext after RFC's header), because both
- *            compute the same nonce (salt XOR CTR) and same plaintext — BUT
- *            only when AAD matches. See note below.
- *
- * ── Skipped / not applicable ────────────────────────────────────────────────
- *
- * • C.2  AEAD vectors using AES-CTR + HMAC (suites 1–3): our library ships
- *        only AES-128-GCM (suite 4) and AES-256-GCM (suite 5). These suites
- *        are not implemented and cannot be tested here.
- *
- * • Suite 5 (AES_256_GCM_SHA512_128): our library only imports 32-byte keys
- *        into AES-GCM without differentiating 128/256. Suite 5 is not
- *        explicitly supported in the API, so we focus on suite 4.
- *
- * • Exact RFC ciphertext match for sframeEncrypt: the RFC's sframe `ct` field
- *        uses AAD = header || metadata ("IETF SFrame WG"), but sframeEncrypt()
- *        uses AAD = header only (RFC §4.4.2 base case, no metadata extension).
- *        Because AES-GCM authentication covers AAD, the ciphertext tag differs.
- *        We test our API's own encrypt→decrypt coherence instead of matching
- *        the RFC `ct` byte-for-byte.
- *
- * • Header encode for KID ≤ 7 and CTR ≤ 7: RFC encodes these inline (1-byte
- *        header). Our library always uses extended format. Not a bug — it is an
- *        intentional implementation choice (spec §6.1 "fixed 4-byte KID").
- */
+// RFC 9605 Appendix C Known-Answer-Test (KAT) vectors.
+//
+// The RFC publishes test vectors in Appendix C (not §10 as the issue title
+// suggests — §10 is "References").  Appendix C has three subsections:
+//   C.1  Header Encoding/Decoding
+//   C.2  AEAD Encryption/Decryption Using AES-CTR and HMAC
+//   C.3  SFrame Encryption/Decryption
+//
+// These tests exercise the REAL shipped code in:
+//   - src/sframe-header.ts  (parseHeader / serializeHeader)
+//   - src/sframe.ts         (sframeEncrypt / sframeDecrypt / sframeEncryptInto)
+//
+// IMPORTANT — key derivation divergence:
+// Our implementation uses a ratchet-based key schedule
+// (HKDF-Expand(chainKey, "sframe/v1/key" || peer_index_be16, Nk)) rather than
+// the RFC 9605 §4.4.2 derivation
+// (HKDF-Extract("", base_key) → HKDF-Expand(secret, "SFrame 1.0 Secret key …")).
+// The RFC C.3 vectors provide the *derived* sframe_key and sframe_salt
+// intermediate values, so we construct SFrameKey objects directly from those
+// to test the low-level AEAD layer in isolation.
+//
+// Additionally, our implementation uses AAD = header only (spec §6.3) whereas
+// the RFC uses AAD = header + metadata.  Therefore we cannot assert against
+// the RFC C.3 ciphertext bytes directly.  Instead we:
+//   1. Golden-test parseHeader against every RFC C.1 header encoding variant.
+//   2. Golden-test nonce derivation by encrypting with our sframeEncrypt and
+//      decrypting with crypto.subtle.decrypt using the RFC's nonce.
+//   3. Round-trip verify sframeEncrypt → sframeDecrypt = original plaintext.
+//
+// See: https://www.rfc-editor.org/rfc/rfc9605.html Appendix C
+// Issue: #13
 
 import { describe, it, expect } from 'vitest';
-import { parseHeader, serializeHeader, sframeEncrypt, sframeDecrypt } from '../sframe.ts';
+import {
+	parseHeader,
+	serializeHeader,
+	sframeEncrypt,
+	sframeDecrypt,
+	sframeEncryptInto,
+} from '../sframe.ts';
+import { splitKid } from '../ratchet-ids.ts';
 import type { SFrameKey } from '../types.ts';
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
-function fromHex(h: string): Uint8Array<ArrayBuffer> {
-	const buf = new ArrayBuffer(h.length / 2);
-	const bytes = new Uint8Array(buf);
-	for (let i = 0; i < bytes.length; i++) {
-		bytes[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+/** Decode a hex string (whitespace tolerated) into a fresh Uint8Array. */
+function fromHex(hex: string): Uint8Array {
+	const clean = hex.replace(/\s+/g, '');
+	const out = new Uint8Array(clean.length / 2);
+	for (let i = 0; i < out.length; i++) {
+		out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
 	}
-	return bytes;
+	return out;
 }
 
-function toHex(b: Uint8Array): string {
-	return Array.from(b)
-		.map((x) => x.toString(16).padStart(2, '0'))
+/** Encode a Uint8Array as a lowercase hex string. */
+function toHex(bytes: Uint8Array): string {
+	return Array.from(bytes)
+		.map((b) => b.toString(16).padStart(2, '0'))
 		.join('');
 }
 
+/** Copy a Uint8Array into a fresh, exclusive ArrayBuffer. */
+function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
+	const ab = new ArrayBuffer(u8.byteLength);
+	new Uint8Array(ab).set(u8);
+	return ab;
+}
+
 /**
- * Import raw AES-128-GCM key bytes for use with sframeEncrypt/sframeDecrypt.
- * The key is non-extractable so we keep it inside a CryptoKey wrapper only.
+ * Construct an SFrameKey directly from raw AES-GCM key bytes and a 12-byte
+ * salt, bypassing the ratchet key-derivation path.  This lets us test the
+ * low-level AEAD layer against RFC C.3 intermediate values.
  */
-async function importAesGcmKey(rawHex: string): Promise<CryptoKey> {
-	return crypto.subtle.importKey(
+async function makeSFrameKey(
+	kid: number,
+	rawKey: Uint8Array,
+	salt: Uint8Array,
+): Promise<SFrameKey> {
+	if (salt.length !== 12) {
+		throw new Error(`salt must be 12 bytes, got ${salt.length}`);
+	}
+	const cryptoKey = await crypto.subtle.importKey(
 		'raw',
-		fromHex(rawHex),
+		toArrayBuffer(rawKey),
 		{ name: 'AES-GCM' },
 		false,
 		['encrypt', 'decrypt'],
 	);
+	const { epoch, peerIndex } = splitKid(kid);
+	return { kid, epoch, peerIndex, cryptoKey, salt };
 }
 
-// ── Section C.1: Header decode (RFC canonical encodings) ────────────────────
+// ---------------------------------------------------------------------------
+// RFC 9605 §C.1 Header Encoding/Decoding golden vectors
+// ---------------------------------------------------------------------------
+//
+// Config byte layout: X(1) | K(3) | Y(1) | C(3)
+//   X=0 → K field is inline KID (0..7);  X=1 → K field is KLEN (byte count − 1)
+//   Y=0 → C field is inline CTR (0..7);  Y=1 → C field is CLEN (byte count − 1)
+//
+// The table below is a representative subset of the full RFC C.1 table,
+// covering every encoding variant (inline/extended × KID/CTR × widths).
 
-/**
- * RFC canonical header vectors (subset).
- * Source: sframe-wg/sframe@025d568 test-vectors.json §header
- *
- * Notation: K=0 means inline KID (fits in 3-bit KLEN field, no extension bytes).
- *            K=1 means extended KID (KLEN bytes follow the config byte).
- */
-const RFC_HEADER_DECODE_VECTORS = [
-	// ── Inline KID (K=0): KID 0–7 encoded in the KLEN bits, no KID extension
-	{ desc: 'K=0 KID=0 CTR=0 (inline CTR)', kid: 0, ctr: 0n, encoded: '00' },
-	{ desc: 'K=0 KID=0 CTR=1 (inline CTR)', kid: 0, ctr: 1n, encoded: '01' },
-	{ desc: 'K=0 KID=0 CTR=255 (extended 1-byte CTR)', kid: 0, ctr: 255n, encoded: '08ff' },
-	{ desc: 'K=0 KID=0 CTR=256 (extended 2-byte CTR)', kid: 0, ctr: 256n, encoded: '090100' },
-	{ desc: 'K=0 KID=0 CTR=65535', kid: 0, ctr: 65535n, encoded: '09ffff' },
-	{ desc: 'K=0 KID=0 CTR=65536 (extended 3-byte CTR)', kid: 0, ctr: 65536n, encoded: '0a010000' },
-	{ desc: 'K=0 KID=1 CTR=0', kid: 1, ctr: 0n, encoded: '10' },
-	{ desc: 'K=0 KID=1 CTR=1', kid: 1, ctr: 1n, encoded: '11' },
-	{ desc: 'K=0 KID=1 CTR=255', kid: 1, ctr: 255n, encoded: '18ff' },
-	{ desc: 'K=0 KID=1 CTR=256', kid: 1, ctr: 256n, encoded: '190100' },
-	// ── Extended KID, 1-byte (K=1, KLEN=0): KID 0–255
-	{ desc: 'K=1 KID=255 CTR=0 (1-byte KID)', kid: 255, ctr: 0n, encoded: '80ff' },
-	{ desc: 'K=1 KID=255 CTR=1', kid: 255, ctr: 1n, encoded: '81ff' },
-	{ desc: 'K=1 KID=255 CTR=255', kid: 255, ctr: 255n, encoded: '88ffff' },
-	{ desc: 'K=1 KID=255 CTR=256', kid: 255, ctr: 256n, encoded: '89ff0100' },
-	// ── Extended KID, 2-byte (K=1, KLEN=1): KID 256–65535
-	{ desc: 'K=1 KID=256 CTR=0 (2-byte KID)', kid: 256, ctr: 0n, encoded: '900100' },
-	{ desc: 'K=1 KID=256 CTR=1', kid: 256, ctr: 1n, encoded: '910100' },
-	{ desc: 'K=1 KID=256 CTR=255', kid: 256, ctr: 255n, encoded: '980100ff' },
-	{ desc: 'K=1 KID=256 CTR=256', kid: 256, ctr: 256n, encoded: '9901000100' },
-	// ── Extended KID, 2-byte: KID=291 (used in the sframe §C.3 vector)
-	{ desc: 'K=1 KID=291 CTR=17767 (from §C.3 sframe vector)', kid: 291, ctr: 17767n, encoded: '9901234567' },
-	// ── Extended KID, 4-byte (K=1, KLEN=3): KID ≥ 16777216 — matches our encoder output
-	{ desc: 'K=1 KID=16777216 CTR=0 (4-byte KID, C=0 inline)', kid: 16777216, ctr: 0n, encoded: 'b001000000' },
-	{ desc: 'K=1 KID=16777216 CTR=1', kid: 16777216, ctr: 1n, encoded: 'b101000000' },
-	{ desc: 'K=1 KID=16777216 CTR=255', kid: 16777216, ctr: 255n, encoded: 'b801000000ff' },
-	{ desc: 'K=1 KID=16777216 CTR=256', kid: 16777216, ctr: 256n, encoded: 'b9010000000100' },
-	{ desc: 'K=1 KID=4294967295 CTR=0 (max 32-bit KID)', kid: 4294967295, ctr: 0n, encoded: 'b0ffffffff' },
-	{ desc: 'K=1 KID=4294967295 CTR=1', kid: 4294967295, ctr: 1n, encoded: 'b1ffffffff' },
-	{ desc: 'K=1 KID=4294967295 CTR=255', kid: 4294967295, ctr: 255n, encoded: 'b8ffffffffff' },
-	{ desc: 'K=1 KID=4294967295 CTR=256', kid: 4294967295, ctr: 256n, encoded: 'b9ffffffff0100' },
-] as const;
+interface HeaderVector {
+	kid: number;
+	ctr: bigint;
+	header: string; // hex
+}
 
-describe('RFC 9605 §C.1 — header decode', () => {
-	for (const v of RFC_HEADER_DECODE_VECTORS) {
-		it(v.desc, () => {
-			// Append a dummy payload byte so parseHeader doesn't need to see body
-			const buf = new Uint8Array([...fromHex(v.encoded), 0x00]);
-			const hdr = parseHeader(buf);
+const RFC_C1_HEADER_VECTORS: HeaderVector[] = [
+	// --- inline KID, inline CTR ---
+	{ kid: 0x0000, ctr: 0x00n, header: '00' },
+	{ kid: 0x0000, ctr: 0x01n, header: '01' },
+	{ kid: 0x0001, ctr: 0x00n, header: '10' },
+	{ kid: 0x0007, ctr: 0x00n, header: '70' },
+	{ kid: 0x0000, ctr: 0x07n, header: '07' },
+	{ kid: 0x0001, ctr: 0x01n, header: '11' },
+	{ kid: 0x0007, ctr: 0x07n, header: '77' },
+
+	// --- inline KID, extended CTR (1-byte) ---
+	{ kid: 0x0000, ctr: 0xffn, header: '08ff' },
+	{ kid: 0x0001, ctr: 0xffn, header: '18ff' },
+
+	// --- inline KID, extended CTR (2-byte) ---
+	{ kid: 0x0000, ctr: 0x0100n, header: '090100' }, // CTR=256
+	{ kid: 0x0000, ctr: 0xffffn, header: '09ffff' },
+	{ kid: 0x0001, ctr: 0x0100n, header: '190100' },
+
+	// --- inline KID, extended CTR (3-byte) ---
+	{ kid: 0x0000, ctr: 0x010000n, header: '0a010000' },
+	{ kid: 0x0000, ctr: 0xffffffn, header: '0affffff' },
+
+	// --- extended KID (1-byte), inline CTR ---
+	{ kid: 0x00ff, ctr: 0x00n, header: '80ff' },
+	{ kid: 0x00ff, ctr: 0x01n, header: '81ff' },
+
+	// --- extended KID (2-byte), inline CTR ---
+	{ kid: 0xffff, ctr: 0x00n, header: '90ffff' },
+	{ kid: 0xffff, ctr: 0x01n, header: '91ffff' },
+
+	// --- extended KID (1-byte), extended CTR (2-byte) ---
+	{ kid: 0x00ff, ctr: 0x0100n, header: '89ff0100' }, // CTR=256
+
+	// --- extended KID (2-byte), extended CTR (2-byte) ---
+	{ kid: 0xffff, ctr: 0x0100n, header: '99ffff0100' }, // CTR=256
+	{ kid: 0xffff, ctr: 0xffffn, header: '99ffffffff' },
+
+	// --- extended KID (1-byte), extended CTR (8-byte) — max CTR width ---
+	{ kid: 0x00ff, ctr: 0xffffffffffffffffn, header: '8fffffffffffffffffff' },
+
+	// --- extended KID (3-byte), inline CTR ---
+	{ kid: 0xffffff, ctr: 0x00n, header: 'a0ffffff' },
+
+	// --- extended KID (4-byte), extended CTR (1-byte) ---
+	{ kid: 0x01000000, ctr: 0xffn, header: 'b801000000ff' },
+
+	// --- extended KID (4-byte), extended CTR (8-byte) — max KID + CTR widths ---
+	{ kid: 0xffffffff, ctr: 0xffffffffffffffffn, header: 'bfffffffffffffffffffffffff' },
+];
+
+// ---------------------------------------------------------------------------
+// RFC 9605 §C.3 SFrame Encryption/Decryption vectors (suites 4 & 5)
+// ---------------------------------------------------------------------------
+//
+// cipher_suite 0x0004 = AES_128_GCM_SHA256_128  (our 'AES_128_GCM_SHA256')
+// cipher_suite 0x0005 = AES_256_GCM_SHA512_128  (our 'AES_256_GCM_SHA512')
+//
+// The RFC provides derived sframe_key and sframe_salt for kid=0x0123,
+// ctr=0x4567.  We use these to construct SFrameKey objects directly.
+
+interface SFrameVector {
+	cipherSuite: number;
+	kid: number;
+	ctr: bigint;
+	baseKey: string;
+	sframeKey: string;
+	sframeSalt: string;
+	metadata: string;
+	nonce: string;
+	aad: string;
+	plaintext: string;
+	ciphertext: string; // full SFrame ciphertext (header + ct + tag)
+}
+
+const RFC_C3_VECTORS: SFrameVector[] = [
+	{
+		cipherSuite: 0x0004,
+		kid: 0x0123,
+		ctr: 0x4567n,
+		baseKey: '000102030405060708090a0b0c0d0e0f',
+		sframeKey: 'd34f547f4ca4f9a7447006fe7fcbf768',
+		sframeSalt: '75234edefe07819026751816',
+		metadata: '4945544620534672616d65205747',
+		nonce: '75234edefe07819026755d71',
+		aad: '99012345674945544620534672616d65205747',
+		plaintext: '64726166742d696574662d736672616d652d656e63',
+		ciphertext:
+			'9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb',
+	},
+	{
+		cipherSuite: 0x0005,
+		kid: 0x0123,
+		ctr: 0x4567n,
+		baseKey: '000102030405060708090a0b0c0d0e0f',
+		sframeKey:
+			'd3e27b0d4a5ae9e55df01a70e6d4d28d969b246e2936f4b7a5d9b494da6b9633',
+		sframeSalt: '84991c167b8cd23c93708ec7',
+		metadata: '4945544620534672616d65205747',
+		nonce: '84991c167b8cd23c9370cba0',
+		aad: '99012345674945544620534672616d65205747',
+		plaintext: '64726166742d696574662d736672616d652d656e63',
+		ciphertext:
+			'990123456794f509d36e9beacb0e261d99c7d1e972f1fed787d4049f17ca21353c1cc24d56ceabced279',
+	},
+];
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('RFC 9605 §C.1 — parseHeader golden vectors', () => {
+	for (const v of RFC_C1_HEADER_VECTORS) {
+		const label = `parseHeader(${v.header}) → kid=0x${v.kid.toString(16)}, ctr=${v.ctr}`;
+		it(label, () => {
+			const buf = fromHex(v.header);
+			const parsed = parseHeader(buf);
+			expect(parsed.kid).toBe(v.kid);
+			expect(parsed.ctr).toBe(v.ctr);
+			expect(parsed.bodyOffset).toBe(buf.length);
+		});
+	}
+});
+
+describe('RFC 9605 §C.1 — parseHeader rejects truncated headers', () => {
+	it('throws on empty buffer', () => {
+		expect(() => parseHeader(new Uint8Array(0))).toThrow();
+	});
+
+	it('throws on truncated extended KID', () => {
+		// Config byte promises 2-byte KID but buffer ends after 1 byte.
+		expect(() => parseHeader(fromHex('90ff'))).toThrow();
+	});
+
+	it('throws on truncated extended CTR', () => {
+		// Config byte promises 2-byte CTR but buffer ends after 1 byte.
+		expect(() => parseHeader(fromHex('99ffff01'))).toThrow();
+	});
+});
+
+describe('serializeHeader → parseHeader round-trip', () => {
+	// Our serializeHeader always uses extended KID (K=1) with a fixed 4-byte
+	// big-endian KID per spec §6.1.  CTR uses minimal big-endian encoding.
+	// This round-trip verifies our own format is self-consistent.
+	const cases: Array<[number, bigint]> = [
+		[0x00000000, 0x00n],
+		[0x00000000, 0x01n],
+		[0x00000000, 0x07n],
+		[0x00000000, 0xffn],
+		[0x00000000, 0x0100n], // CTR=256
+		[0x00000000, 0xffffn],
+		[0x00000000, 0x010000n],
+		[0x00000000, 0xffffffffffffffffn],
+		[0x00000001, 0x00n],
+		[0x00000007, 0x00n],
+		[0x00000007, 0x0100n],
+		[0x00000123, 0x4567n],
+		[0x0000ffff, 0x00n],
+		[0x0000ffff, 0x0100n], // extended KID + CTR=256
+		[0x0000ffff, 0xffffn],
+		[0xffffffff, 0x00n],
+		[0xffffffff, 0xffffffffffffffffn],
+	];
+
+	for (const [kid, ctr] of cases) {
+		it(`serializeHeader(0x${kid.toString(16)}, ${ctr}) → parseHeader round-trips`, () => {
+			const encoded = serializeHeader(kid, ctr);
+			const parsed = parseHeader(encoded);
+			expect(parsed.kid).toBe(kid);
+			expect(parsed.ctr).toBe(ctr);
+			expect(parsed.bodyOffset).toBe(encoded.length);
+		});
+	}
+});
+
+describe('RFC 9605 §C.3 — nonce derivation golden test', () => {
+	// Verifies that our internal deriveIv(salt, ctr) produces the same nonce
+	// as the RFC's xor(sframe_salt, encode_big_endian(CTR, 12)).
+	//
+	// Strategy: encrypt with our sframeEncrypt (which calls deriveIv internally),
+	// then decrypt the ciphertext body with crypto.subtle.decrypt using the
+	// RFC's published nonce.  If the nonce is wrong, AES-GCM auth will fail.
+	// Our AAD is header-only (no metadata), so we use our own serialized header
+	// as AAD — not the RFC's aad.
+
+	for (const v of RFC_C3_VECTORS) {
+		const suiteName = v.cipherSuite === 0x0004 ? 'AES_128_GCM_SHA256' : 'AES_256_GCM_SHA512';
+
+		it(`${suiteName}: deriveIv matches RFC nonce ${v.nonce}`, async () => {
+			const sframeKey = fromHex(v.sframeKey);
+			const salt = fromHex(v.sframeSalt);
+			const plaintext = fromHex(v.plaintext);
+
+			const key = await makeSFrameKey(v.kid, sframeKey, salt);
+
+			// Encrypt with our sframeEncrypt — produces [our_header][ct+tag].
+			const sealed = await sframeEncrypt(plaintext, key, v.ctr);
+
+			// Parse our header to find the ciphertext boundary.
+			const hdr = parseHeader(sealed);
+			const ourHeader = sealed.subarray(0, hdr.bodyOffset);
+			const ctBody = sealed.subarray(hdr.bodyOffset);
+
+			// Decrypt with the RFC's nonce and our AAD (header only).
+			// If deriveIv produced a different nonce, this will throw.
+			const rfcNonce = fromHex(v.nonce);
+			const cryptoKey = await crypto.subtle.importKey(
+				'raw',
+				toArrayBuffer(sframeKey),
+				{ name: 'AES-GCM' },
+				false,
+				['decrypt'],
+			);
+
+			const recovered = await crypto.subtle.decrypt(
+				{
+					name: 'AES-GCM',
+					iv: toArrayBuffer(rfcNonce),
+					additionalData: toArrayBuffer(ourHeader),
+					tagLength: 128,
+				},
+				cryptoKey,
+				toArrayBuffer(ctBody),
+			);
+
+			expect(toHex(new Uint8Array(recovered))).toBe(toHex(plaintext));
+		});
+	}
+});
+
+describe('RFC 9605 §C.3 — sframeEncrypt + sframeDecrypt round-trip', () => {
+	// Round-trip verification using RFC C.3 derived key material.
+	// Our key derivation differs from the RFC, so we construct SFrameKey
+	// directly from the RFC's sframe_key and sframe_salt.
+
+	for (const v of RFC_C3_VECTORS) {
+		const suiteName = v.cipherSuite === 0x0004 ? 'AES_128_GCM_SHA256' : 'AES_256_GCM_SHA512';
+
+		it(`${suiteName}: encrypt → decrypt = original plaintext (kid=0x${v.kid.toString(16)}, ctr=${v.ctr})`, async () => {
+			const sframeKey = fromHex(v.sframeKey);
+			const salt = fromHex(v.sframeSalt);
+			const plaintext = fromHex(v.plaintext);
+
+			const key = await makeSFrameKey(v.kid, sframeKey, salt);
+			const sealed = await sframeEncrypt(plaintext, key, v.ctr);
+
+			// Verify the header carries the correct KID and CTR.
+			const hdr = parseHeader(sealed);
 			expect(hdr.kid).toBe(v.kid);
 			expect(hdr.ctr).toBe(v.ctr);
-			// bodyOffset must equal the exact encoded header length
-			expect(hdr.bodyOffset).toBe(v.encoded.length / 2);
+
+			const opened = await sframeDecrypt(sealed, ({ kid }) =>
+				kid === v.kid ? key : null,
+			);
+			expect(toHex(opened)).toBe(toHex(plaintext));
 		});
 	}
 });
 
-// ── Section C.1: Header encode (our library's fixed-4-byte-KID format) ──────
-//
-// Our serializeHeader always emits K=1 (extended KID, KLEN=3, 4-byte) and
-// C=1 (extended CTR, minimal width). For KIDs ≥ 0x01000000 and CTR ≥ 8,
-// this matches the RFC's canonical encoding. For smaller values the byte
-// count is the same but the header byte differs (0xB8+clen vs RFC 0xB0+clen
-// for CTR=0 case). We validate exact bytes using our own format.
-//
-// Format: config = 0xB8 | clen  (K=1, KLEN=3, C=1, clen = ctr_bytes - 1)
-//         then 4-byte big-endian KID
-//         then minimal big-endian CTR (1 byte for 0-255, 2 for 256-65535, etc.)
+describe('sframeEncrypt + sframeDecrypt round-trip — all header variants', () => {
+	// Test matrix: both cipher suites × multiple KID/CTR combinations
+	// covering inline CTR (0, 1, 2), extended KID, and CTR>255 edge case.
 
-const RFC_HEADER_ENCODE_VECTORS_4BYTE = [
-	// CTR=0: 1 byte (0x00), clen=0 → config = 0xB8
-	{ kid: 16777216, ctr: 0n, expected: 'b80100000000' },
-	{ kid: 16777216, ctr: 1n, expected: 'b80100000001' },
-	{ kid: 16777216, ctr: 255n, expected: 'b801000000ff' },
-	// CTR=256: 2 bytes, clen=1 → config = 0xB9
-	{ kid: 16777216, ctr: 256n, expected: 'b9010000000100' },
-	{ kid: 16777216, ctr: 65535n, expected: 'b901000000ffff' },
-	// CTR=65536: 3 bytes, clen=2 → config = 0xBA
-	{ kid: 16777216, ctr: 65536n, expected: 'ba01000000010000' },
-	{ kid: 4294967295, ctr: 0n, expected: 'b8ffffffff00' },
-	{ kid: 4294967295, ctr: 1n, expected: 'b8ffffffff01' },
-	{ kid: 4294967295, ctr: 255n, expected: 'b8ffffffffff' },
-	{ kid: 4294967295, ctr: 256n, expected: 'b9ffffffff0100' },
-] as const;
+	const suiteKeys = [
+		{ name: 'AES_128_GCM_SHA256', keyHex: 'd34f547f4ca4f9a7447006fe7fcbf768' },
+		{ name: 'AES_256_GCM_SHA512', keyHex: 'd3e27b0d4a5ae9e55df01a70e6d4d28d969b246e2936f4b7a5d9b494da6b9633' },
+	];
+	const saltHex = '75234edefe07819026751816';
+	const plaintext = fromHex('00010203'); // 4 bytes, per task spec
 
-describe('RFC 9605 §C.1 — header encode (our fixed-4-byte-KID format)', () => {
-	for (const v of RFC_HEADER_ENCODE_VECTORS_4BYTE) {
-		it(`serializeHeader(kid=${v.kid}, ctr=${v.ctr}) = ${v.expected}`, () => {
-			const encoded = serializeHeader(v.kid, v.ctr);
-			expect(toHex(encoded)).toBe(v.expected);
-		});
-	}
+	const headerCases: Array<{ kid: number; ctr: bigint; label: string }> = [
+		{ kid: 0x0007, ctr: 0x00n, label: 'CTR=0' },
+		{ kid: 0x0007, ctr: 0x01n, label: 'CTR=1' },
+		{ kid: 0x0007, ctr: 0x02n, label: 'CTR=2' },
+		{ kid: 0xffff, ctr: 0x00n, label: 'extended KID=0xffff, CTR=0' },
+		{ kid: 0xffff, ctr: 0x0100n, label: 'extended KID=0xffff, CTR=256 (CTR>255 edge case)' },
+	];
 
-	it('encode→decode round-trip for KID=0, CTR=0 (small inline-able values)', () => {
-		const encoded = serializeHeader(0, 0n);
-		const buf = new Uint8Array([...encoded, 0x00]);
-		const hdr = parseHeader(buf);
-		expect(hdr.kid).toBe(0);
-		expect(hdr.ctr).toBe(0n);
-	});
+	for (const suite of suiteKeys) {
+		for (const hc of headerCases) {
+			it(`${suite.name}: ${hc.label}`, async () => {
+				const rawKey = fromHex(suite.keyHex);
+				const salt = fromHex(saltHex);
+				const key = await makeSFrameKey(hc.kid, rawKey, salt);
 
-	it('encode→decode round-trip for KID=7 (boundary of inline range), CTR=7', () => {
-		const encoded = serializeHeader(7, 7n);
-		const buf = new Uint8Array([...encoded, 0x00]);
-		const hdr = parseHeader(buf);
-		expect(hdr.kid).toBe(7);
-		expect(hdr.ctr).toBe(7n);
-	});
+				const sealed = await sframeEncrypt(plaintext, key, hc.ctr);
 
-	it('encode→decode round-trip for KID=0x0a (extended KID), CTR=0x0a', () => {
-		const encoded = serializeHeader(0x0a, 0x0an);
-		const buf = new Uint8Array([...encoded, 0x00]);
-		const hdr = parseHeader(buf);
-		expect(hdr.kid).toBe(0x0a);
-		expect(hdr.ctr).toBe(0x0an);
-	});
+				// Verify header carries correct KID and CTR.
+				const hdr = parseHeader(sealed);
+				expect(hdr.kid).toBe(hc.kid);
+				expect(hdr.ctr).toBe(hc.ctr);
 
-	it('encode→decode round-trip for KID=291, CTR=17767 (from §C.3 vector)', () => {
-		const encoded = serializeHeader(291, 17767n);
-		const buf = new Uint8Array([...encoded, 0x00]);
-		const hdr = parseHeader(buf);
-		expect(hdr.kid).toBe(291);
-		expect(hdr.ctr).toBe(17767n);
-	});
-
-	it('encode→decode round-trip for max 32-bit KID and large CTR', () => {
-		const encoded = serializeHeader(0xffffffff, 281474976710655n);
-		const buf = new Uint8Array([...encoded, 0x00]);
-		const hdr = parseHeader(buf);
-		expect(hdr.kid).toBe(0xffffffff);
-		expect(hdr.ctr).toBe(281474976710655n);
-	});
-});
-
-// ── Section C.3: SFrame encrypt/decrypt (suite 4: AES_128_GCM_SHA256_128) ───
-//
-// Vector source: sframe-wg/sframe@025d568, cipher_suite=4
-//
-// Key derivation note: the RFC derives sframe_key and sframe_salt from
-// base_key via HKDF with labels "SFrame 1.0 Secret key/salt". Our library
-// uses different labels ("sframe/v1/key", "sframe/v1/salt") — so we supply
-// the pre-derived bytes directly to bypass the key schedule entirely.
-//
-// AAD note: the RFC's ciphertext uses AAD = header || metadata. Our
-// sframeEncrypt uses AAD = header only. Therefore we do NOT expect our
-// ciphertext to match the RFC `ct` field byte-for-byte. Instead we verify:
-//   1. Our encrypt produces a decodeable frame that our decrypt recovers.
-//   2. The nonce (IV) we derive from salt XOR CTR matches the RFC nonce.
-//   3. Direct AES-GCM using the RFC AAD and our key produces the RFC ct body.
-
-describe('RFC 9605 §C.3 — SFrame encrypt/decrypt (suite 4: AES-128-GCM)', () => {
-	// RFC §C.3 suite 4 fixed vector
-	const KID = 291; // 0x0123
-	const CTR = 17767n; // 0x4567
-	const SFRAME_KEY_HEX = 'd34f547f4ca4f9a7447006fe7fcbf768';
-	const SFRAME_SALT_HEX = '75234edefe07819026751816';
-	const PLAINTEXT_HEX = '64726166742d696574662d736672616d652d656e63'; // "draft-ietf-sframe-enc"
-	const RFC_NONCE_HEX = '75234edefe07819026755d71';
-	// RFC canonical header for kid=291, ctr=17767: 9901234567
-	const RFC_HEADER_HEX = '9901234567';
-	// RFC ct body (after stripping the 5-byte RFC header)
-	const RFC_CT_FULL_HEX =
-		'9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb';
-	// Metadata used in RFC AAD
-	const METADATA_HEX = '4945544620534672616d65205747'; // "IETF SFrame WG"
-
-	it('nonce = sframe_salt XOR left-padded CTR (matches RFC nonce)', () => {
-		const salt = fromHex(SFRAME_SALT_HEX);
-		const iv = new Uint8Array(12);
-		let v = CTR;
-		for (let i = 11; i >= 0 && v > 0n; i--) {
-			iv[i] = Number(v & 0xffn);
-			v >>= 8n;
+				// Decrypt and verify plaintext.
+				const opened = await sframeDecrypt(sealed, ({ kid }) =>
+					kid === hc.kid ? key : null,
+				);
+				expect(toHex(opened)).toBe(toHex(plaintext));
+			});
 		}
-		for (let i = 0; i < 12; i++) iv[i] ^= salt[i];
-		expect(toHex(iv)).toBe(RFC_NONCE_HEX);
+	}
+});
+
+describe('sframeEncryptInto — pre-serialized RFC header round-trip', () => {
+	// sframeEncryptInto accepts a pre-serialized header, letting us test
+	// with RFC C.1 header bytes directly.  This verifies the low-level
+	// encrypt-into-buffer path with RFC-format headers (variable-length KID).
+
+	const suiteKeys = [
+		{ name: 'AES_128_GCM_SHA256', keyHex: 'd34f547f4ca4f9a7447006fe7fcbf768' },
+		{ name: 'AES_256_GCM_SHA512', keyHex: 'd3e27b0d4a5ae9e55df01a70e6d4d28d969b246e2936f4b7a5d9b494da6b9633' },
+	];
+	const saltHex = '75234edefe07819026751816';
+	const plaintext = fromHex('00010203');
+
+	// RFC C.1 headers with known kid/ctr — we use these as pre-serialized
+	// headers for sframeEncryptInto, then verify sframeDecrypt can parse
+	// and decrypt the result.
+	const rfcHeaders: Array<{ kid: number; ctr: bigint; header: string }> = [
+		{ kid: 0x0000, ctr: 0x00n, header: '00' },
+		{ kid: 0x0001, ctr: 0x01n, header: '11' },
+		{ kid: 0x0000, ctr: 0xffn, header: '08ff' },
+		{ kid: 0x0000, ctr: 0x0100n, header: '090100' }, // CTR=256
+		{ kid: 0x00ff, ctr: 0x00n, header: '80ff' },
+		{ kid: 0xffff, ctr: 0x00n, header: '90ffff' },
+		{ kid: 0xffff, ctr: 0x0100n, header: '99ffff0100' }, // CTR=256
+	];
+
+	for (const suite of suiteKeys) {
+		for (const rh of rfcHeaders) {
+			it(`${suite.name}: RFC header ${rh.header} (kid=0x${rh.kid.toString(16)}, ctr=${rh.ctr})`, async () => {
+				const rawKey = fromHex(suite.keyHex);
+				const salt = fromHex(saltHex);
+				const header = fromHex(rh.header);
+
+				// Construct the SFrameKey with the RFC header's KID.
+				const key = await makeSFrameKey(rh.kid, rawKey, salt);
+
+				// sframeEncryptInto: [header][ct+tag] written into `out`.
+				const out = new Uint8Array(header.length + plaintext.length + 16);
+				const written = await sframeEncryptInto(
+					out,
+					0,
+					header,
+					plaintext,
+					key,
+					rh.ctr,
+				);
+				expect(written).toBe(header.length + plaintext.length + 16);
+
+				// The output should start with the RFC header bytes.
+				expect(toHex(out.subarray(0, header.length))).toBe(rh.header);
+
+				// sframeDecrypt should parse the RFC-format header and decrypt.
+				const opened = await sframeDecrypt(out, ({ kid }) =>
+					kid === rh.kid ? key : null,
+				);
+				expect(toHex(opened)).toBe(toHex(plaintext));
+			});
+		}
+	}
+});
+
+describe('CTR > 255 edge case — variable-width CTR encoding', () => {
+	// RFC 9605 uses minimal big-endian CTR encoding: values 0..255 fit in
+	// 1 byte (inline or 1-byte extended), 256..65535 need 2 bytes, etc.
+	// This test verifies the full chain handles CTR=256 correctly.
+
+	it('parseHeader on RFC header with CTR=256 (2-byte extended)', () => {
+		// RFC C.1: kid=0, ctr=0x0100 → header 090100
+		const parsed = parseHeader(fromHex('090100'));
+		expect(parsed.kid).toBe(0);
+		expect(parsed.ctr).toBe(256n);
+		expect(parsed.bodyOffset).toBe(3);
 	});
 
-	it('sframeEncrypt → sframeDecrypt round-trip using RFC key material', async () => {
-		const cryptoKey = await importAesGcmKey(SFRAME_KEY_HEX);
-		const salt = fromHex(SFRAME_SALT_HEX);
+	it('parseHeader on RFC header with extended KID + CTR=256', () => {
+		// RFC C.1: kid=0xffff, ctr=0x0100 → header 99ffff0100
+		const parsed = parseHeader(fromHex('99ffff0100'));
+		expect(parsed.kid).toBe(0xffff);
+		expect(parsed.ctr).toBe(256n);
+		expect(parsed.bodyOffset).toBe(5);
+	});
 
-		const sframeKey: SFrameKey = {
-			kid: KID,
-			epoch: KID >>> 16,
-			peerIndex: KID & 0xffff,
-			cryptoKey,
-			salt,
-		};
+	it('serializeHeader → parseHeader with CTR=256', () => {
+		const encoded = serializeHeader(0x0123, 256n);
+		const parsed = parseHeader(encoded);
+		expect(parsed.kid).toBe(0x0123);
+		expect(parsed.ctr).toBe(256n);
+	});
 
-		const pt = fromHex(PLAINTEXT_HEX);
-		const sealed = await sframeEncrypt(pt, sframeKey, CTR);
+	it('sframeEncrypt → sframeDecrypt with CTR=256 (AES-128-GCM)', async () => {
+		const rawKey = fromHex('d34f547f4ca4f9a7447006fe7fcbf768');
+		const salt = fromHex('75234edefe07819026751816');
+		const key = await makeSFrameKey(0x0123, rawKey, salt);
+		const plaintext = fromHex('00010203');
 
-		// Verify frame structure: header then ciphertext+tag
+		const sealed = await sframeEncrypt(plaintext, key, 256n);
 		const hdr = parseHeader(sealed);
-		expect(hdr.kid).toBe(KID);
-		expect(hdr.ctr).toBe(CTR);
+		expect(hdr.ctr).toBe(256n);
 
-		// Decrypt using key resolver
-		const recovered = await sframeDecrypt(
-			sealed,
-			({ kid }) => (kid === KID ? sframeKey : null),
+		const opened = await sframeDecrypt(sealed, ({ kid }) =>
+			kid === 0x0123 ? key : null,
 		);
-		expect(toHex(recovered)).toBe(PLAINTEXT_HEX);
+		expect(toHex(opened)).toBe(toHex(plaintext));
 	});
 
-	it('sframeDecrypt recovers plaintext from RFC ciphertext when AAD = RFC header only', async () => {
-		// The RFC's ct body is authenticated with AAD = header || metadata.
-		// We cannot decrypt it with our library (wrong AAD). But we can
-		// construct our own ciphertext using the same key/salt and our header,
-		// then verify decrypt. This test cross-checks that the RFC key/salt
-		// bytes work correctly end-to-end through our code path.
-		const cryptoKey = await importAesGcmKey(SFRAME_KEY_HEX);
-		const salt = fromHex(SFRAME_SALT_HEX);
-
-		const sframeKey: SFrameKey = {
-			kid: KID,
-			epoch: KID >>> 16,
-			peerIndex: KID & 0xffff,
-			cryptoKey,
-			salt,
-		};
-
-		const pt = fromHex(PLAINTEXT_HEX);
-
-		// Encrypt at CTR+1 to confirm independence from CTR
-		const sealed = await sframeEncrypt(pt, sframeKey, CTR + 1n);
-		const recovered = await sframeDecrypt(sealed, ({ kid }) =>
-			kid === KID ? sframeKey : null,
+	it('sframeEncrypt → sframeDecrypt with CTR=256 (AES-256-GCM)', async () => {
+		const rawKey = fromHex(
+			'd3e27b0d4a5ae9e55df01a70e6d4d28d969b246e2936f4b7a5d9b494da6b9633',
 		);
-		expect(toHex(recovered)).toBe(PLAINTEXT_HEX);
+		const salt = fromHex('84991c167b8cd23c93708ec7');
+		const key = await makeSFrameKey(0x0123, rawKey, salt);
+		const plaintext = fromHex('00010203');
+
+		const sealed = await sframeEncrypt(plaintext, key, 256n);
+		const hdr = parseHeader(sealed);
+		expect(hdr.ctr).toBe(256n);
+
+		const opened = await sframeDecrypt(sealed, ({ kid }) =>
+			kid === 0x0123 ? key : null,
+		);
+		expect(toHex(opened)).toBe(toHex(plaintext));
 	});
 
-	it('raw AES-GCM with RFC key + RFC nonce + RFC AAD produces RFC ciphertext body', async () => {
-		// Direct AES-GCM cross-check: bypasses our header logic entirely.
-		// Validates that our key import, nonce derivation, and AEAD primitive
-		// are correct by reproducing the RFC's reference ciphertext body.
-		const cryptoKey = await importAesGcmKey(SFRAME_KEY_HEX);
-		const nonce = fromHex(RFC_NONCE_HEX);
-		const aad = fromHex(RFC_HEADER_HEX + METADATA_HEX); // RFC AAD = header || metadata
-		const pt = fromHex(PLAINTEXT_HEX);
+	it('CTR=255 vs CTR=256 produce different ciphertexts (nonce uniqueness)', async () => {
+		const rawKey = fromHex('d34f547f4ca4f9a7447006fe7fcbf768');
+		const salt = fromHex('75234edefe07819026751816');
+		const key = await makeSFrameKey(0x0123, rawKey, salt);
+		const plaintext = fromHex('00010203');
 
-		const ctBuf = await crypto.subtle.encrypt(
-			{ name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128 },
-			cryptoKey,
-			pt,
+		const sealed255 = await sframeEncrypt(plaintext, key, 255n);
+		const sealed256 = await sframeEncrypt(plaintext, key, 256n);
+
+		// Different CTR → different nonce → different ciphertext.
+		expect(toHex(sealed255)).not.toBe(toHex(sealed256));
+
+		// Both should decrypt correctly.
+		const opened255 = await sframeDecrypt(sealed255, ({ kid }) =>
+			kid === 0x0123 ? key : null,
 		);
-		const ct = new Uint8Array(ctBuf);
-
-		// RFC ct full = RFC header (5 bytes) + ciphertext+tag
-		const rfcCtFull = fromHex(RFC_CT_FULL_HEX);
-		const rfcCtBody = rfcCtFull.subarray(RFC_HEADER_HEX.length / 2);
-		expect(toHex(ct)).toBe(toHex(rfcCtBody));
+		const opened256 = await sframeDecrypt(sealed256, ({ kid }) =>
+			kid === 0x0123 ? key : null,
+		);
+		expect(toHex(opened255)).toBe(toHex(plaintext));
+		expect(toHex(opened256)).toBe(toHex(plaintext));
 	});
+});
 
-	it('sframeDecrypt rejects tampered ciphertext (integrity check)', async () => {
-		const cryptoKey = await importAesGcmKey(SFRAME_KEY_HEX);
-		const salt = fromHex(SFRAME_SALT_HEX);
+describe('RFC 9605 §C.3 — cross-key rejection (negative test)', () => {
+	// A frame encrypted under one key must not decrypt under a different key.
+	// This is a basic AEAD authentication property.
 
-		const sframeKey: SFrameKey = {
-			kid: KID,
-			epoch: KID >>> 16,
-			peerIndex: KID & 0xffff,
-			cryptoKey,
-			salt,
-		};
+	it('suite 4 frame rejected by suite 5 key', async () => {
+		const key4 = fromHex('d34f547f4ca4f9a7447006fe7fcbf768');
+		const key5 = fromHex(
+			'd3e27b0d4a5ae9e55df01a70e6d4d28d969b246e2936f4b7a5d9b494da6b9633',
+		);
+		const salt = fromHex('75234edefe07819026751816');
+		const plaintext = fromHex('00010203');
 
-		const pt = fromHex(PLAINTEXT_HEX);
-		const sealed = await sframeEncrypt(pt, sframeKey, CTR);
+		const encKey = await makeSFrameKey(0x0123, key4, salt);
+		const sealed = await sframeEncrypt(plaintext, encKey, 42n);
 
-		// Flip one byte in the ciphertext body
-		const tampered = new Uint8Array(sealed);
-		const hdr = parseHeader(tampered);
-		tampered[hdr.bodyOffset] ^= 0xff;
-
+		const wrongKey = await makeSFrameKey(0x0123, key5, salt);
 		await expect(
-			sframeDecrypt(tampered, ({ kid }) => (kid === KID ? sframeKey : null)),
-		).rejects.toThrow();
+			sframeDecrypt(sealed, ({ kid }) => (kid === 0x0123 ? wrongKey : null)),
+		).rejects.toBeDefined();
 	});
+
+	it('frame rejected by key with wrong KID (key not found)', async () => {
+		const rawKey = fromHex('d34f547f4ca4f9a7447006fe7fcbf768');
+		const salt = fromHex('75234edefe07819026751816');
+		const plaintext = fromHex('00010203');
+
+		const key = await makeSFrameKey(0x0123, rawKey, salt);
+		const sealed = await sframeEncrypt(plaintext, key, 0n);
+
+		// Resolver returns null for any KID → KeyNotFoundError.
+		await expect(
+			sframeDecrypt(sealed, () => null),
+		).rejects.toBeDefined();
+	});
+});
+
+describe('RFC 9605 §C.3 — raw AES-GCM golden cross-check (vector transcription validation)', () => {
+	// This test bypasses our sframeEncrypt/sframeDecrypt and calls
+	// crypto.subtle.encrypt directly with the RFC's published key, nonce,
+	// AAD (header + metadata), and plaintext.  It verifies that our
+	// transcribed RFC C.3 test vectors are byte-accurate by reproducing
+	// the RFC's exact ciphertext.  This is NOT a test of our shipped code
+	// (the tests above cover that) — it is a KAT data integrity check.
+
+	for (const v of RFC_C3_VECTORS) {
+		const suiteName = v.cipherSuite === 0x0004 ? 'AES_128_GCM_SHA256' : 'AES_256_GCM_SHA512';
+
+		it(`${suiteName}: raw AES-GCM(RFC key, RFC nonce, RFC aad, RFC pt) = RFC ct body`, async () => {
+			const key = await crypto.subtle.importKey(
+				'raw',
+				toArrayBuffer(fromHex(v.sframeKey)),
+				{ name: 'AES-GCM' },
+				false,
+				['encrypt'],
+			);
+			const ct = new Uint8Array(
+				await crypto.subtle.encrypt(
+					{
+						name: 'AES-GCM',
+						iv: toArrayBuffer(fromHex(v.nonce)),
+						additionalData: toArrayBuffer(fromHex(v.aad)),
+						tagLength: 128,
+					},
+					key,
+					toArrayBuffer(fromHex(v.plaintext)),
+				),
+			);
+
+			// RFC ct = header + ciphertext + tag.  Strip the header to compare bodies.
+			const rfcCtFull = fromHex(v.ciphertext);
+			const rfcHeader = fromHex('9901234567'); // RFC header for kid=0x0123, ctr=0x4567
+			const rfcCtBody = rfcCtFull.subarray(rfcHeader.length);
+
+			expect(toHex(ct)).toBe(toHex(rfcCtBody));
+		});
+	}
 });

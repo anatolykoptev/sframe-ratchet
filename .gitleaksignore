@@ -1,0 +1,5 @@
+# RFC 9605 Appendix C test vector key material — false positives.
+# These hex strings are published KAT vectors from RFC 9605, not secrets.
+src/__tests__/sframe.vectors.test.ts:generic-api-key:208
+src/__tests__/sframe.vectors.test.ts:generic-api-key:378
+src/__tests__/sframe.vectors.test.ts:generic-api-key:422
