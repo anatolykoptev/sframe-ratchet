@@ -132,3 +132,24 @@ export class FipsModeViolationError extends SFrameError {
 		super(message, context);
 	}
 }
+
+/**
+ * Anti-replay window rejected a frame whose CTR was already seen within the
+ * current (epoch, peerIndex) sliding window (RFC 9605 §9.3, issue #10).
+ *
+ * Thrown by `decodeFrame` / `drainPreEpochQueue` AFTER `parseHeader` succeeds
+ * and the stale-epoch gate passes, but BEFORE any AEAD attempt — so a replayed
+ * frame never consumes ratchet-retry budget and never touches WebCrypto.
+ * `accept(ctr)` is only called after a successful AEAD decrypt, so a replayed
+ * frame that fails the window check is never recorded as "seen" again.
+ */
+export class ReplayError extends SFrameError {
+	readonly code = 'REPLAY' as const;
+
+	constructor(
+		message: string,
+		public override readonly context: { epoch: number; peerIndex: number; ctr: bigint },
+	) {
+		super(message, context);
+	}
+}

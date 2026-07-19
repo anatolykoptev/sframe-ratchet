@@ -18,8 +18,28 @@ import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
-import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, StaleEpochError } from './errors.ts';
+import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError } from './errors.ts';
+import { MediaReplayWindow } from './replay.ts';
 import { emitMetric } from './metrics.ts';
+
+/**
+ * Get or create the per-(epoch, peerIndex) anti-replay window (RFC 9605 §9.3,
+ * issue #10). Windows are created lazily at the current `replayWindowSize` and
+ * deleted by wipeEpoch() on epoch rotation. O(1) lookup.
+ */
+function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): MediaReplayWindow {
+	let inner = state.replayWindows.get(epoch);
+	if (!inner) {
+		inner = new Map();
+		state.replayWindows.set(epoch, inner);
+	}
+	let w = inner.get(peerIndex);
+	if (!w) {
+		w = new MediaReplayWindow(state.replayWindowSize);
+		inner.set(peerIndex, w);
+	}
+	return w;
+}
 
 export function pipe(
 	state: WorkerState,
@@ -282,7 +302,27 @@ export async function decodeFrame(
 			return; // not an error from caller's perspective
 		}
 
+		// Anti-replay sliding window (RFC 9605 §9.3, issue #10).
+		// AFTER parseHeader + stale-epoch gate, BEFORE AEAD. A replayed frame
+		// is rejected without consuming ratchet-retry budget or touching
+		// WebCrypto. accept() is called only after a successful decrypt below.
+		const replayWindow = getReplayWindow(state, epoch, peerIndex);
+		if (!replayWindow.check(hdr.ctr)) {
+			state.emit({
+				type: 'decrypt_failure', reason: 'replay',
+				kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+			});
+			emitMetric(state, { kind: 'queue_drop', reason: 'replay', epoch });
+			emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
+			throw new ReplayError(
+				`sframe: replay detected (epoch=${epoch} peer=${peerIndex} ctr=${hdr.ctr})`,
+				{ epoch, peerIndex, ctr: hdr.ctr },
+			);
+		}
+
 		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+		// Record the CTR as seen ONLY after a successful AEAD decrypt.
+		replayWindow.accept(hdr.ctr);
 
 		// Reassemble: [unencrypted prefix] [decrypted plaintext]
 		const plaintext = new Uint8Array(N + opened.byteLength);
@@ -293,8 +333,10 @@ export async function decodeFrame(
 		clearStarve(state);
 		emitMetric(state, { kind: 'decrypt', epoch, peerIndex, bytes: plaintext.byteLength });
 	} catch (err) {
-		// StaleEpochError already emitted its decrypt_failure event above.
-		if (!(err instanceof StaleEpochError)) {
+		// StaleEpochError and ReplayError already emitted their decrypt_failure
+		// events above (with specific reasons). Only emit the generic
+		// decrypt_failed for other errors.
+		if (!(err instanceof StaleEpochError) && !(err instanceof ReplayError)) {
 			const detail = err instanceof Error ? err.message : String(err);
 			const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
 			emitMetric(state, {
@@ -312,7 +354,7 @@ export async function decodeFrame(
 				detail,
 			});
 		} else {
-			// StaleEpochError: emit metrics event too
+			// StaleEpochError / ReplayError: emit metrics event too
 			emitMetric(state, {
 				kind: 'decrypt_fail',
 				code: (err as { code: string }).code,
@@ -444,9 +486,24 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					pushToQueue(state, frame, peerIndex);
 					continue;
 				}
+				// Anti-replay sliding window — same check/accept as decodeFrame
+				// (RFC 9605 §9.3, issue #10). A replayed frame queued before the
+				// first epoch must still be caught when drained.
+				const replayWindow = getReplayWindow(state, epoch, peerIndex);
+				if (!replayWindow.check(hdr.ctr)) {
+					state.emit({
+						type: 'decrypt_failure', reason: 'replay',
+						kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+					});
+					emitMetric(state, { kind: 'queue_drop', reason: 'replay', epoch });
+					emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
+					continue; // drop the replayed frame; do not re-enqueue
+				}
 				// Use the ratchet retry helper so that within-epoch key advances are
 				// also handled for queued frames, consistent with the live decode path.
 				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+				// Record the CTR as seen ONLY after a successful AEAD decrypt.
+				replayWindow.accept(hdr.ctr);
 
 				// Reassemble: [unencrypted prefix] [decrypted plaintext]
 				const plaintext = new Uint8Array(N + opened.byteLength);
