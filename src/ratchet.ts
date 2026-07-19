@@ -28,6 +28,7 @@ import {
 	validatePeerIndexMap,
 	wrapChainKeyForPeer,
 } from './ratchet-ids.ts';
+import { computeSas, type SasData } from './sas.ts';
 
 export { joinKid, makeKid, newIdentity, splitKid, validatePeerIndexMap } from './ratchet-ids.ts';
 
@@ -39,6 +40,24 @@ interface EpochState {
 	selfPeerIndex: PeerIndex;
 	// Per-sender keys for every member of this epoch, keyed by peer_index.
 	keys: Map<PeerIndex, SFrameKey>;
+}
+
+/**
+ * Per-peer SAS state. Stored when a peer session is established (ChainKey
+ * wrap/unwrap complete and the DH secret is available). Wiped on epoch
+ * rotation (issue #11 security contract: SAS is per-peer, per-epoch).
+ *
+ * SECURITY: `data` is a derivation of the DH secret, not the secret itself.
+ * It is displayed locally and compared out-of-band — never sent over the
+ * signaling channel.
+ */
+interface PeerSasState {
+	/** The epoch this SAS was computed for. */
+	epoch: number;
+	/** The SAS data (decimal + emoji) shown to the user. */
+	data: SasData;
+	/** User-verified flag, set via markSasVerified. */
+	verified: boolean;
 }
 
 export interface RoomRatchetOptions {
@@ -66,6 +85,14 @@ export class RoomRatchet {
 	private peers: Map<string, PeerIdentity>;
 	private epochs: Map<number, EpochState> = new Map();
 	private currentEpoch = -1;
+
+	// Per-peer SAS state, keyed by peerId. Set when a session is established
+	// (ChainKey wrap/unwrap complete + DH secret available). Wiped on epoch
+	// rotation (issue #11: SAS is per-peer, per-epoch).
+	private sasState: Map<string, PeerSasState> = new Map();
+
+	// Callbacks fired when SAS becomes available for a peer (onSasReady).
+	private sasReadyCallbacks: Set<(peerId: string) => void> = new Set();
 
 	constructor(opts: RoomRatchetOptions) {
 		this.identity = opts.identity;
@@ -105,7 +132,14 @@ export class RoomRatchet {
 		const out: EpochAnnouncement[] = [];
 		for (const peer of members) {
 			if (peer.peerId === this.identity.peerId) continue;
-			out.push(await wrapChainKeyForPeer(this.identity.peerId, peer, chainKey, version, peerIndexMap));
+			const { announcement, dhSecret } = await wrapChainKeyForPeer(
+				this.identity.peerId, peer, chainKey, version, peerIndexMap,
+			);
+			out.push(announcement);
+			// SAS: derive from the SAME DH secret used to wrap the ChainKey
+			// (security contract, issue #11). The dhSecret is the X25519
+			// shared secret that was used to derive the wrap key above.
+			await this.installSas(peer.peerId, version, dhSecret);
 		}
 		return out;
 	}
@@ -134,6 +168,11 @@ export class RoomRatchet {
 		const wrapKey = await deriveWrapKey(shared, msg.version);
 		const chainKey = await unwrapChainKey(msg.keyWrapped, msg.iv, wrapKey);
 		await this.installEpoch(msg.version, chainKey, msg.peerIndexMap);
+		// SAS: derive from the SAME DH secret used to unwrap the ChainKey
+		// (security contract, issue #11). `shared` is the X25519 secret that
+		// was used to derive the wrap key above — the same secret the sender
+		// used to wrap, so both peers get identical SAS.
+		await this.installSas(msg.from, msg.version, shared);
 	}
 
 	private async installEpoch(
@@ -152,6 +191,10 @@ export class RoomRatchet {
 		if (version > this.currentEpoch) {
 			const prev = this.currentEpoch;
 			this.currentEpoch = version;
+			// Rotation wipes SAS state (issue #11 security contract: SAS is
+			// per-peer, per-epoch). New epoch → new DH secrets → old SAS is
+			// invalid. We wipe all SAS for epochs < the new current epoch.
+			this.wipeSasForRotation(version);
 			// Memory-leak fix (#60-followup, found via dead-code audit):
 			// without this, this.epochs grows unbounded across rotations
 			// (each member-change adds an entry that's never freed). Spec
@@ -250,8 +293,92 @@ export class RoomRatchet {
 		if (!this.isAuthoritativeAuthor()) return null;
 		const state = this.epochs.get(this.currentEpoch);
 		if (!state) return null;
-		return wrapChainKeyForPeer(
+		const { announcement, dhSecret } = await wrapChainKeyForPeer(
 			this.identity.peerId, peer, state.chainKey, state.epoch, state.peerIndexMap,
 		);
+		// SAS: derive from the SAME DH secret used to re-wrap the ChainKey.
+		await this.installSas(peer.peerId, state.epoch, dhSecret);
+		return announcement;
+	}
+
+	// ---- SAS (Short Authentication String) verification -------------------
+	//
+	// Issue #11: MITM detection for the ECIES ChainKey wrap. SAS bytes are
+	// derived from the SAME DH secret used to wrap/unwrap the ChainKey, so a
+	// MITM who substitutes their own identity key produces a different SAS
+	// that users detect by comparing out-of-band.
+
+	/**
+	 * Internal: compute SAS from a DH secret and store it for `peerId`.
+	 *
+	 * SECURITY INVARIANT: `dhSecret` MUST be the same X25519 shared secret
+	 * that was used to derive the wrap key for this peer in this epoch. The
+	 * callers (startNewEpoch, consumeEpochAnnouncement, rewrapCurrentEpochFor)
+	 * enforce this by passing the `shared` / `dhSecret` variable that fed
+	 * `deriveWrapKey` — the very same bytes.
+	 */
+	private async installSas(peerId: string, epoch: number, dhSecret: Uint8Array): Promise<void> {
+		const data = await computeSas(dhSecret);
+		this.sasState.set(peerId, { epoch, data, verified: false });
+		// Notify subscribers that SAS is available for this peer.
+		for (const cb of this.sasReadyCallbacks) {
+			try { cb(peerId); } catch { /* swallow — a buggy callback must not break others */ }
+		}
+	}
+
+	/**
+	 * Wipe SAS state for all peers whose SAS belongs to an epoch older than
+	 * `newEpoch`. Called on epoch rotation (issue #11: SAS is per-peer,
+	 * per-epoch; rotation wipes it).
+	 */
+	private wipeSasForRotation(newEpoch: number): void {
+		for (const [peerId, state] of this.sasState) {
+			if (state.epoch < newEpoch) {
+				this.sasState.delete(peerId);
+			}
+		}
+	}
+
+	/**
+	 * Returns the SAS (decimal + emoji) for an established peer session, or
+	 * `null` if no session has been established for `peerId` in the current
+	 * epoch.
+	 *
+	 * The SAS is displayed locally and compared out-of-band. It is NEVER sent
+	 * over the signaling channel.
+	 */
+	getSas(peerId: string): SasData | null {
+		return this.sasState.get(peerId)?.data ?? null;
+	}
+
+	/**
+	 * Record the user's out-of-band SAS verification result for `peerId`.
+	 * Call with `true` after the user confirms the SAS matches, `false` to
+	 * revoke (e.g. mismatch detected or session re-keyed).
+	 */
+	markSasVerified(peerId: string, verified: boolean): void {
+		const state = this.sasState.get(peerId);
+		if (state) {
+			state.verified = verified;
+		}
+	}
+
+	/**
+	 * Returns the SAS verification state for `peerId`. `false` if no session
+	 * is established or the user has not yet verified.
+	 */
+	isSasVerified(peerId: string): boolean {
+		return this.sasState.get(peerId)?.verified ?? false;
+	}
+
+	/**
+	 * Subscribe to a callback that fires when a peer session is established
+	 * and SAS is available for out-of-band comparison.
+	 *
+	 * @returns An unsubscribe function. Call it to remove the listener.
+	 */
+	onSasReady(callback: (peerId: string) => void): () => void {
+		this.sasReadyCallbacks.add(callback);
+		return () => { this.sasReadyCallbacks.delete(callback); };
 	}
 }

@@ -131,10 +131,26 @@ export function newIdentity(peerId: string): IdentityKeyPair {
 	return { peerId, publicKey: kp.publicKey, privateKey: kp.privateKey };
 }
 
+/** Result of {@link wrapChainKeyForPeer}: the announcement + the DH secret. */
+export interface WrapChainKeyResult {
+	announcement: EpochAnnouncement;
+	/**
+	 * The X25519 shared secret used to derive the wrap key. Returned so the
+	 * caller can derive SAS bytes from the SAME secret (security contract:
+	 * SAS must derive from the same DH secret that wrapped the ChainKey).
+	 * The caller is responsible for not logging this.
+	 */
+	dhSecret: Uint8Array;
+}
+
 /**
  * Wrap a ChainKey for a specific recipient at a given version.
  * Generates a fresh ephemeral X25519 keypair (forward secrecy), computes
  * ECDH → HKDF → AES-GCM(ChainKey).
+ *
+ * Returns both the announcement and the DH shared secret. The DH secret is
+ * needed by the caller to derive SAS bytes — SAS MUST derive from the same
+ * DH secret that wrapped the ChainKey (security contract, issue #11).
  *
  * The caller owns the ChainKey lifecycle; this helper neither stores nor
  * zeroises it. `peerIndexMap` is copied verbatim into the announcement — it
@@ -148,12 +164,12 @@ export async function wrapChainKeyForPeer(
 	chainKey: Uint8Array,
 	version: number,
 	peerIndexMap: Record<string, PeerIndex>,
-): Promise<EpochAnnouncement> {
+): Promise<WrapChainKeyResult> {
 	const ephemeral = generateX25519Keypair();
 	const shared = await x25519Dh(ephemeral.privateKey, peer.publicKey);
 	const wrapKey = await deriveWrapKey(shared, version);
 	const { ciphertext, iv } = await wrapChainKey(chainKey, wrapKey);
-	return {
+	const announcement: EpochAnnouncement = {
 		version,
 		from: fromPeerId,
 		forPeer: peer.peerId,
@@ -162,6 +178,7 @@ export async function wrapChainKeyForPeer(
 		ephemeralPub: ephemeral.publicKey,
 		peerIndexMap: { ...peerIndexMap },
 	};
+	return { announcement, dhSecret: shared };
 }
 
 /**

@@ -49,6 +49,18 @@ export type { SFrameHeader } from './sframe-header.js';
 export { RoomRatchet } from './ratchet.js';
 export type { RoomRatchetOptions } from './ratchet.js';
 
+// ---- SAS (Short Authentication String) verification (#11) ----------------
+export {
+	computeSas,
+	deriveSasBytes,
+	generateDecimalSas,
+	generateEmojiSas,
+	SAS_EMOJI_TABLE,
+	SAS_DECIMAL_GROUP_COUNT,
+	SAS_DECIMAL_DIGITS_PER_GROUP,
+} from './sas.js';
+export type { EmojiEntry, SasData } from './sas.js';
+
 // ---- Ratchet IDs / KID helpers -------------------------------------------
 export {
 	makeKid,
