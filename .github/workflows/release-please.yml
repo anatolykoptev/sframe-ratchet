@@ -22,21 +22,29 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  pull-requests: write
+# Least privilege — grant only what each job needs.
+permissions: {}
 
 jobs:
   release-please:
     name: Release PR / tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      major: ${{ steps.release.outputs.major }}
+      minor: ${{ steps.release.outputs.minor }}
+      patch: ${{ steps.release.outputs.patch }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - name: Run release-please
+        uses: googleapis/release-please-action@v5.0.0
         id: release
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -53,7 +61,7 @@ jobs:
       id-token: write   # OIDC
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: actions/setup-node@v4
