@@ -153,3 +153,25 @@ export class ReplayError extends SFrameError {
 		super(message, context);
 	}
 }
+
+/**
+ * The key for (epoch, peerIndex) has been marked invalid after exceeding the
+ * configured `failureTolerance` of consecutive AEAD failures (issue #14,
+ * pattern from livekit/client-sdk-js ParticipantKeyHandler.ts:58).
+ *
+ * Thrown by `decodeFrame` / `drainPreEpochQueue` AFTER the replay check passes
+ * but BEFORE any AEAD attempt — so a frame for an invalidated key is dropped
+ * without consuming ratchet-retry budget or touching WebCrypto, saving CPU.
+ * Subsequent frames at that index keep being dropped until a fresh key is
+ * installed (which resets the failure count via `resetFailureCount`).
+ */
+export class KeyInvalidError extends SFrameError {
+	readonly code = 'KEY_INVALID' as const;
+
+	constructor(
+		message: string,
+		public override readonly context: { epoch: number; peerIndex: number; failures: number },
+	) {
+		super(message, context);
+	}
+}

@@ -18,9 +18,10 @@ import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
-import { KeyNotFoundError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError } from './errors.ts';
+import { KeyNotFoundError, KeyInvalidError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError, AEADAuthError } from './errors.ts';
 import { MediaReplayWindow } from './replay.ts';
 import { emitMetric } from './metrics.ts';
+import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
 
 /**
  * Get or create the per-(epoch, peerIndex) anti-replay window (RFC 9605 §9.3,
@@ -320,9 +321,32 @@ export async function decodeFrame(
 			);
 		}
 
+		// Failure-invalidation gate (issue #14, pattern from livekit
+		// ParticipantKeyHandler.ts:58). AFTER parseHeader + stale-epoch gate +
+		// replay check, BEFORE tryDecryptWithRatchet. When the key for
+		// (epoch, peerIndex) has exceeded `failureTolerance` consecutive AEAD
+		// failures, drop the frame WITHOUT attempting AEAD — saving CPU and
+		// surfacing the problem via the `key_invalidated` metric event. The
+		// count is reset by a successful decrypt (recordSuccess) or by a fresh
+		// key install (resetFailureCount in installEpoch).
+		if (isKeyInvalid(state, epoch, peerIndex)) {
+			state.emit({
+				type: 'decrypt_failure', reason: 'key_invalid',
+				kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+			});
+			emitMetric(state, { kind: 'decrypt_fail', code: 'KEY_INVALID', epoch, peerIndex });
+			throw new KeyInvalidError(
+				`sframe: key invalid for epoch=${epoch} peer=${peerIndex} (failures exceeded tolerance)`,
+				{ epoch, peerIndex, failures: state.failureCounts.get(`${epoch}:${peerIndex}`) ?? 0 },
+			);
+		}
+
 		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 		// Record the CTR as seen ONLY after a successful AEAD decrypt.
 		replayWindow.accept(hdr.ctr);
+		// A successful decrypt resets the consecutive AEAD failure count for
+		// this key (issue #14) — a single good frame clears the slate.
+		recordSuccess(state, epoch, peerIndex);
 
 		// Reassemble: [unencrypted prefix] [decrypted plaintext]
 		const plaintext = new Uint8Array(N + opened.byteLength);
@@ -333,10 +357,20 @@ export async function decodeFrame(
 		clearStarve(state);
 		emitMetric(state, { kind: 'decrypt', epoch, peerIndex, bytes: plaintext.byteLength });
 	} catch (err) {
-		// StaleEpochError and ReplayError already emitted their decrypt_failure
-		// events above (with specific reasons). Only emit the generic
-		// decrypt_failed for other errors.
-		if (!(err instanceof StaleEpochError) && !(err instanceof ReplayError)) {
+		// Failure-invalidation tracking (issue #14): only count AEAD-correctness
+		// failures (AEADAuthError, RatchetWindowExhaustedError) as key-correctness
+		// signals. NOT StaleEpochError / HeaderParseError / ReplayError /
+		// KeyNotFoundError / KeyInvalidError — those are not AEAD failures.
+		if (
+			hdrEpoch >= 0 && hdrPeerIndex >= 0 &&
+			(err instanceof AEADAuthError || err instanceof RatchetWindowExhaustedError)
+		) {
+			recordFailure(state, hdrEpoch, hdrPeerIndex);
+		}
+		// StaleEpochError, ReplayError, and KeyInvalidError already emitted
+		// their decrypt_failure events above (with specific reasons). Only emit
+		// the generic decrypt_failed for other errors.
+		if (!(err instanceof StaleEpochError) && !(err instanceof ReplayError) && !(err instanceof KeyInvalidError)) {
 			const detail = err instanceof Error ? err.message : String(err);
 			const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
 			emitMetric(state, {
@@ -499,11 +533,24 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
 					continue; // drop the replayed frame; do not re-enqueue
 				}
+				// Failure-invalidation gate (issue #14) — same as decodeFrame.
+				// AFTER replay check, BEFORE tryDecryptWithRatchet. A queued frame
+				// for an already-invalidated key is dropped without AEAD.
+				if (isKeyInvalid(state, epoch, peerIndex)) {
+					state.emit({
+						type: 'decrypt_failure', reason: 'key_invalid',
+						kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+					});
+					emitMetric(state, { kind: 'decrypt_fail', code: 'KEY_INVALID', epoch, peerIndex });
+					continue; // drop; do not re-enqueue
+				}
 				// Use the ratchet retry helper so that within-epoch key advances are
 				// also handled for queued frames, consistent with the live decode path.
 				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 				// Record the CTR as seen ONLY after a successful AEAD decrypt.
 				replayWindow.accept(hdr.ctr);
+				// A successful decrypt resets the consecutive AEAD failure count.
+				recordSuccess(state, epoch, peerIndex);
 
 				// Reassemble: [unencrypted prefix] [decrypted plaintext]
 				const plaintext = new Uint8Array(N + opened.byteLength);
@@ -513,6 +560,16 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				// Drained a frame — starvation (if any) has ended.
 				clearStarve(state);
 			} catch (err) {
+				// Failure-invalidation tracking (issue #14): only count AEAD
+				// failures (AEADAuthError, RatchetWindowExhaustedError). The drain
+				// path parses the header inline, so re-derive epoch/peerIndex from
+				// the typed error context where available.
+				if (err instanceof AEADAuthError || err instanceof RatchetWindowExhaustedError) {
+					const ctx = err.context as { epoch?: number; peerIndex?: number };
+					if (typeof ctx.epoch === 'number' && typeof ctx.peerIndex === 'number') {
+						recordFailure(state, ctx.epoch, ctx.peerIndex);
+					}
+				}
 				// Decrypt error on retry — emit observability event (CLAUDE.md: no silent errors).
 				const detail = err instanceof Error ? err.message : String(err);
 				state.emit({

@@ -46,6 +46,8 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		starveFramesDropped: 0,
 		starveLastEmitMs: 0,
 		starvePeerIndex: undefined,
+		failureCounts: new Map(),
+		failureTolerance: -1,
 	};
 }
 
@@ -94,10 +96,76 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			state.replayWindows.clear();
 			return;
 		}
+		case 'set-failure-tolerance': {
+			// Allow -1 (unlimited); clamp other negatives to -1. Non-integers floored.
+			const t = Math.floor(msg.tolerance);
+			state.failureTolerance = t < -1 ? -1 : t;
+			// Changing the threshold invalidates existing counts — clear them so
+			// a previously-invalidated key gets a fresh slate under the new rule.
+			state.failureCounts.clear();
+			return;
+		}
 		case 'teardown':
 			teardown(state);
 			return;
 	}
+}
+
+/**
+ * Build the failure-count map key for (epoch, peerIndex).
+ */
+function failureKey(epoch: number, peerIndex: PeerIndex): string {
+	return `${epoch}:${peerIndex}`;
+}
+
+/**
+ * Returns true when the key for (epoch, peerIndex) has been marked invalid:
+ * failureTolerance >= 0 AND the consecutive AEAD failure count for this key
+ * exceeds the tolerance (issue #14). When true, decodeFrame / drainPreEpochQueue
+ * drop the frame WITHOUT attempting AEAD — saving CPU and surfacing the problem
+ * via the `key_invalidated` metric event.
+ */
+export function isKeyInvalid(state: WorkerState, epoch: number, peerIndex: PeerIndex): boolean {
+	if (state.failureTolerance < 0) return false;
+	const count = state.failureCounts.get(failureKey(epoch, peerIndex)) ?? 0;
+	return count > state.failureTolerance;
+}
+
+/**
+ * Increment the consecutive AEAD failure count for (epoch, peerIndex). If the
+ * count now exceeds `failureTolerance`, emit a `key_invalidated` metric event
+ * (exactly once, at the transition point). Only AEAD-correctness failures
+ * (AEADAuthError, RatchetWindowExhaustedError) should call this — NOT
+ * StaleEpochError / HeaderParseError / ReplayError / KeyNotFoundError, which
+ * are not key-correctness signals.
+ */
+export function recordFailure(state: WorkerState, epoch: number, peerIndex: PeerIndex): void {
+	if (state.failureTolerance < 0) return; // unlimited — no tracking needed
+	const key = failureKey(epoch, peerIndex);
+	const prev = state.failureCounts.get(key) ?? 0;
+	const next = prev + 1;
+	state.failureCounts.set(key, next);
+	// Emit the metric exactly once at the transition into invalid state.
+	if (prev <= state.failureTolerance && next > state.failureTolerance) {
+		emitMetric(state, { kind: 'key_invalidated', epoch, peerIndex, failures: next });
+	}
+}
+
+/**
+ * Reset the consecutive AEAD failure count for (epoch, peerIndex) to 0 after a
+ * successful decrypt. A single good frame clears the slate.
+ */
+export function recordSuccess(state: WorkerState, epoch: number, peerIndex: PeerIndex): void {
+	if (state.failureTolerance < 0) return; // unlimited — nothing tracked
+	state.failureCounts.set(failureKey(epoch, peerIndex), 0);
+}
+
+/**
+ * Reset the failure count for (epoch, peerIndex) to 0. Called on new key
+ * install so a fresh key starts with a clean failure slate.
+ */
+export function resetFailureCount(state: WorkerState, epoch: number, peerIndex: PeerIndex): void {
+	state.failureCounts.delete(failureKey(epoch, peerIndex));
 }
 
 export function installEpoch(
@@ -116,6 +184,12 @@ export function installEpoch(
 		});
 	}
 	state.epochs.set(epoch, { epoch, selfPeerIndex, keys, ratchetSteps: new Map() });
+	// A fresh key starts with a clean failure slate (issue #14). Reset the
+	// per-(epoch, peerIndex) failure count for every peer in the new epoch's
+	// key table so a previously-invalidated key is retried after re-install.
+	for (const pi of bundles.keys()) {
+		resetFailureCount(state, epoch, pi);
+	}
 	if (epoch > state.currentEpoch) {
 		const prevEpoch = state.currentEpoch;
 		state.currentEpoch = epoch;
@@ -171,4 +245,5 @@ export function teardown(state: WorkerState): void {
 	state.currentEpoch = -1;
 	state.currentMinValidEpoch = 0;
 	state.selfPeerIndex = null;
+	state.failureCounts.clear();
 }

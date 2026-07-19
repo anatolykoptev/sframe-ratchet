@@ -80,7 +80,18 @@ export interface SetReplayWindowMsg {
 	 */
 	size: number;
 }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg | SetReplayWindowMsg;
+export interface SetFailureToleranceMsg {
+	type: 'set-failure-tolerance';
+	/**
+	 * Number of consecutive AEAD failures (per epoch+peerIndex) after which the
+	 * key is marked invalid and subsequent frames are dropped WITHOUT attempting
+	 * AEAD (issue #14, pattern from livekit ParticipantKeyHandler.ts:58).
+	 * -1 = unlimited (default; preserves current behavior). 0 = invalidate on
+	 * the first failure. Changing the value clears all existing failure counts.
+	 */
+	tolerance: number;
+}
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg | SetReplayWindowMsg | SetFailureToleranceMsg;
 
 /**
  * Structured telemetry event posted from the worker to the main thread when
@@ -93,13 +104,14 @@ export type MetricsEvent =
 	| { kind: 'ratchet_retry'; epoch: number; peerIndex: number; steps: number; succeeded: boolean }
 	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch' | 'replay'; epoch?: number }
 	| { kind: 'replay_drop'; epoch: number; peerIndex: number; ctr: string }
+	| { kind: 'key_invalidated'; epoch: number; peerIndex: number; failures: number }
 	| { kind: 'epoch_advance'; from: number; to: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
 	| { type: 'ready' }
 	| { type: 'metrics'; event: MetricsEvent }
-	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch' | 'replay';
+	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch' | 'replay' | 'key_invalid';
 		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string }
 	/**
 	 * Receiver installed/activated a new epoch (currentEpoch advanced). First-class
@@ -219,6 +231,23 @@ export interface WorkerState {
 	starveLastEmitMs: number;
 	/** Last peer_index seen on a dropped frame (in-payload KID hint; may be undefined). */
 	starvePeerIndex?: PeerIndex;
+	/**
+	 * Per-(epoch, peerIndex) consecutive AEAD failure counts (issue #14).
+	 * Keyed by `${epoch}:${peerIndex}`. Incremented by `recordFailure` on
+	 * AEADAuthError / RatchetWindowExhaustedError; reset to 0 by `recordSuccess`
+	 * (on a successful decrypt) and by `resetFailureCount` (on new key install).
+	 * When a count exceeds `failureTolerance`, `isKeyInvalid` returns true and
+	 * subsequent frames are dropped WITHOUT attempting AEAD.
+	 */
+	failureCounts: Map<string, number>;
+	/**
+	 * Consecutive AEAD failure threshold per (epoch, peerIndex) before a key is
+	 * marked invalid (issue #14, pattern from livekit ParticipantKeyHandler.ts:58).
+	 * -1 = unlimited (default; preserves current behavior — keys are never
+	 * invalidated). 0 = invalidate on the first failure. Changed at runtime via
+	 * the `set-failure-tolerance` control message, which clears all counts.
+	 */
+	failureTolerance: number;
 }
 
 export const GRACE_WINDOW_MS = 2000;
