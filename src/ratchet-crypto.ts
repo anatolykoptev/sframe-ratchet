@@ -129,7 +129,7 @@ async function importAesKey(raw: ArrayBuffer, usages: KeyUsage[]): Promise<Crypt
 
 // --- HKDF / key-wrap ------------------------------------------------------
 
-async function hkdfExtractExpand(
+export async function hkdfExtractExpand(
 	ikm: Uint8Array,
 	info: Uint8Array,
 	length: number,

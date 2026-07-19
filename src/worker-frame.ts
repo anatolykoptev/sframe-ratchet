@@ -18,7 +18,7 @@ import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
 import { KeyNotFoundError, KeyInvalidError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError, AEADAuthError } from './errors.ts';
-import { MediaReplayWindow } from './replay.ts';
+import { SlidingReplayWindow } from './chat/replay.ts';
 import { emitMetric } from './metrics.ts';
 import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
 
@@ -27,7 +27,7 @@ import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
  * issue #10). Windows are created lazily at the current `replayWindowSize` and
  * deleted by wipeEpoch() on epoch rotation. O(1) lookup.
  */
-function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): MediaReplayWindow {
+function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): SlidingReplayWindow {
 	let inner = state.replayWindows.get(epoch);
 	if (!inner) {
 		inner = new Map();
@@ -35,7 +35,7 @@ function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): 
 	}
 	let w = inner.get(peerIndex);
 	if (!w) {
-		w = new MediaReplayWindow(state.replayWindowSize);
+		w = new SlidingReplayWindow(state.replayWindowSize);
 		inner.set(peerIndex, w);
 	}
 	return w;

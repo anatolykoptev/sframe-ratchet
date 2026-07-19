@@ -6,7 +6,7 @@
 
 import type { PeerIndex, SFrameKey } from './types.ts';
 import type { CipherSuite } from './ratchet-crypto.ts';
-import type { MediaReplayWindow } from './replay.ts';
+import type { SlidingReplayWindow } from './chat/replay.ts';
 import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
 
 export type Role = 'sender' | 'receiver';
@@ -200,7 +200,7 @@ export interface WorkerState {
 	 * peerIndex. Windows are created lazily by decodeFrame / drainPreEpochQueue
 	 * and deleted by wipeEpoch() on epoch rotation. O(1) lookup.
 	 */
-	replayWindows: Map<number, Map<number, MediaReplayWindow>>;
+	replayWindows: Map<number, Map<number, SlidingReplayWindow>>;
 	/**
 	 * Optional SIF (Secure Interoperable Frame) trailer bytes.
 	 * When set, the encoder appends these bytes after the SFrame ciphertext, and the
