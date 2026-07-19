@@ -48,6 +48,10 @@
     "./chat": {
       "import": "./dist/chat/index.js",
       "types": "./dist/chat/index.d.ts"
+    },
+    "./mls": {
+      "import": "./dist/mls/index.js",
+      "types": "./dist/mls/index.d.ts"
     }
   },
   "files": [
@@ -63,15 +67,24 @@
   },
   "peerDependencies": {
     "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0"
+    "@noble/hashes": "^2.2.0",
+    "ts-mls": "^1.6.2"
+  },
+  "peerDependenciesMeta": {
+    "ts-mls": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.9.0",
+    "ts-mls": "^1.6.2",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"
-  }
+  },
+  "dependencies": {}
 }
