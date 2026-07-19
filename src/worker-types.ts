@@ -248,6 +248,16 @@ export interface WorkerState {
 	 * the `set-failure-tolerance` control message, which clears all counts.
 	 */
 	failureTolerance: number;
+	/**
+	 * In-flight ratchet derivation promises (issue #15, pattern from livekit
+	 * ParticipantKeyHandler.ts:26 ratchetPromiseMap). Keyed by
+	 * `${epoch}:${peerIndex}`. When multiple frames fail AEAD simultaneously
+	 * for the same (epoch, peerIndex), only ONE retry loop runs at a time —
+	 * concurrent callers await the in-flight promise instead of starting
+	 * parallel HKDF derivations. The promise is deleted in a finally block
+	 * after the loop settles (success or exhaustion).
+	 */
+	ratchetPromises: Map<string, Promise<Uint8Array>>;
 }
 
 export const GRACE_WINDOW_MS = 2000;

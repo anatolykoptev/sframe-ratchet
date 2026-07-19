@@ -48,6 +48,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		starvePeerIndex: undefined,
 		failureCounts: new Map(),
 		failureTolerance: -1,
+		ratchetPromises: new Map(),
 	};
 }
 
@@ -246,4 +247,5 @@ export function teardown(state: WorkerState): void {
 	state.currentMinValidEpoch = 0;
 	state.selfPeerIndex = null;
 	state.failureCounts.clear();
+	state.ratchetPromises.clear();
 }

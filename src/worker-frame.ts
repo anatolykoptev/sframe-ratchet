@@ -169,6 +169,15 @@ export async function encodeFrame(
  * tries steps M+1 .. M+window — none match the older frame. The older frame
  * fails. This is expected and correct: the retry window smooths RTP reorder
  * jitter around a single key advance; it does not reconstruct past keys.
+ *
+ * Concurrent ratchet dedup (issue #15, pattern from livekit
+ * ParticipantKeyHandler.ts:26 ratchetPromiseMap): when multiple frames fail
+ * AEAD simultaneously for the same (epoch, peerIndex), only ONE retry loop
+ * runs at a time. Concurrent callers await the in-flight promise (stored in
+ * `state.ratchetPromises`) instead of starting parallel HKDF derivations.
+ * After the in-flight promise settles, the concurrent caller retries step 0
+ * with the now-advanced cached key; if that still fails, it starts its own
+ * retry loop (the first caller's promise is done, so no duplication).
  */
 async function tryDecryptWithRatchet(
 	state: WorkerState,
@@ -199,35 +208,89 @@ async function tryDecryptWithRatchet(
 	// If the window is disabled, surface the original failure immediately.
 	if (state.ratchetWindowSize === 0) throw firstError;
 
-	// Steps 1..ratchetWindowSize — forward ratchet.
-	let currentRaw = key.rawKey;
-	const salt = key.salt;
-	for (let step = 1; step <= state.ratchetWindowSize; step++) {
-		const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex, state.suite);
+	const dedupKey = `${epoch}:${peerIndex}`;
+
+	// Concurrent ratchet dedup (issue #15). If a retry loop is already in
+	// flight for this (epoch, peerIndex), await it instead of starting a
+	// parallel derivation. After it settles:
+	//   - Resolved: the cached key was advanced. Retry step 0 — it may match
+	//     our frame without a new loop.
+	//   - Rejected (window exhausted): the cached key was NOT advanced. Fall
+	//     through to start our own retry loop.
+	const inFlight = state.ratchetPromises.get(dedupKey);
+	if (inFlight) {
 		try {
-			const plaintext = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
-				if (e === epoch && pi === peerIndex) return next;
-				const ep = state.epochs.get(e);
-				return ep?.keys.get(pi) ?? null;
-			});
-			// Success at step N: advance the cached key so subsequent frames at
-			// this step hit immediately without re-deriving.
-			entry.keys.set(peerIndex, next);
-			entry.ratchetSteps.set(peerIndex, (entry.ratchetSteps.get(peerIndex) ?? 0) + step);
-			emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: step, succeeded: true });
-			return plaintext;
+			await inFlight;
+			// The first caller advanced the cached key. Retry step 0 with the
+			// now-advanced key — it may match our frame without a new loop.
+			try {
+				return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+					const ep = state.epochs.get(e);
+					return ep?.keys.get(pi) ?? null;
+				});
+			} catch {
+				// Step 0 still fails — our frame is at a different step than
+				// the one the first caller found. Fall through to our own
+				// retry loop (the in-flight promise is done, so we're the
+				// only one running it now).
+			}
 		} catch {
-			// This step failed; advance and try next.
-			currentRaw = next.rawKey;
+			// The in-flight promise rejected (window exhausted). The cached
+			// key was NOT advanced. Fall through to start our own retry loop.
 		}
 	}
 
-	// Window exhausted — wrap in a typed error so callers can branch on it.
-	emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: state.ratchetWindowSize, succeeded: false });
-	throw new RatchetWindowExhaustedError(
-		`sframe: ratchet window exhausted (${state.ratchetWindowSize} steps) for epoch=${epoch} peer=${peerIndex}`,
-		{ epoch, peerIndex, attempts: state.ratchetWindowSize },
-	);
+	// No in-flight promise (or the previous one already settled). Run the
+	// retry loop under a dedup promise so concurrent callers await us
+	// instead of racing a parallel HKDF derivation.
+	const retryLoop = async (): Promise<Uint8Array> => {
+		// Re-fetch the current cached key — it may have been advanced by a
+		// concurrent caller we just awaited. Chain from its rawKey so we
+		// don't re-derive already-cached steps.
+		const currentKey = entry.keys.get(peerIndex);
+		if (!currentKey) {
+			throw new KeyNotFoundError(
+				`sframe: key not found for epoch=${epoch} peer=${peerIndex}`,
+				{ epoch, peerIndex },
+			);
+		}
+		let currentRaw = currentKey.rawKey;
+		const salt = currentKey.salt;
+		for (let step = 1; step <= state.ratchetWindowSize; step++) {
+			const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex, state.suite);
+			try {
+				const plaintext = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
+					if (e === epoch && pi === peerIndex) return next;
+					const ep = state.epochs.get(e);
+					return ep?.keys.get(pi) ?? null;
+				});
+				// Success at step N: advance the cached key so subsequent frames at
+				// this step hit immediately without re-deriving.
+				entry.keys.set(peerIndex, next);
+				entry.ratchetSteps.set(peerIndex, (entry.ratchetSteps.get(peerIndex) ?? 0) + step);
+				emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: step, succeeded: true });
+				return plaintext;
+			} catch {
+				// This step failed; advance and try next.
+				currentRaw = next.rawKey;
+			}
+		}
+
+		// Window exhausted — wrap in a typed error so callers can branch on it.
+		emitMetric(state, { kind: 'ratchet_retry', epoch, peerIndex, steps: state.ratchetWindowSize, succeeded: false });
+		throw new RatchetWindowExhaustedError(
+			`sframe: ratchet window exhausted (${state.ratchetWindowSize} steps) for epoch=${epoch} peer=${peerIndex}`,
+			{ epoch, peerIndex, attempts: state.ratchetWindowSize },
+		);
+	};
+
+	const promise = retryLoop();
+	state.ratchetPromises.set(dedupKey, promise);
+	try {
+		return await promise;
+	} finally {
+		state.ratchetPromises.delete(dedupKey);
+	}
 }
 
 export async function decodeFrame(
