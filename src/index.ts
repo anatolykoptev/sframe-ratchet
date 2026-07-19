@@ -28,6 +28,7 @@ export {
 	HeaderParseError,
 	QueueFullError,
 	FipsModeViolationError,
+	ReplayError,
 } from './errors.js';
 
 // ---- Strict-FIPS mode ----------------------------------------------------
@@ -89,7 +90,10 @@ export type { Codec, FrameKind } from './worker-types.js';
 
 // ---- SIF trailer (mixed-room support) ------------------------------------
 export { DEFAULT_SIF_TRAILER, getDefaultSifTrailer } from './sif-trailer.js';
-export type { SetSifTrailerMsg } from './worker-types.js';
+export type { SetSifTrailerMsg, SetReplayWindowMsg } from './worker-types.js';
+
+// ---- Anti-replay sliding window (RFC 9605 §9.3) --------------------------
+export { MediaReplayWindow } from './replay.js';
 
 // ---- Telemetry / observability --------------------------------------------
 export type { MetricsEvent } from './worker-types.js';

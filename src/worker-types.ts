@@ -6,6 +6,7 @@
 
 import type { PeerIndex, SFrameKey } from './types.ts';
 import type { CipherSuite } from './ratchet-crypto.ts';
+import type { MediaReplayWindow } from './replay.ts';
 
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
@@ -69,7 +70,17 @@ export interface StreamsMsg {
 	codec?: Codec;
 }
 export interface SetMetricsEnabledMsg { type: 'set-metrics-enabled'; enabled: boolean }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg;
+export interface SetReplayWindowMsg {
+	type: 'set-replay-window';
+	/**
+	 * Size of the per-(epoch, peerIndex) anti-replay sliding window (RFC 9605
+	 * §9.3). 0 disables protection entirely (debug/tests only). Default 64.
+	 * Changing the size clears all existing windows (they were created with the
+	 * old size).
+	 */
+	size: number;
+}
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg | SetReplayWindowMsg;
 
 /**
  * Structured telemetry event posted from the worker to the main thread when
@@ -80,14 +91,15 @@ export type MetricsEvent =
 	| { kind: 'decrypt'; epoch: number; peerIndex: number; bytes: number }
 	| { kind: 'decrypt_fail'; code: string; epoch?: number; peerIndex?: number }
 	| { kind: 'ratchet_retry'; epoch: number; peerIndex: number; steps: number; succeeded: boolean }
-	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch'; epoch?: number }
+	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch' | 'replay'; epoch?: number }
+	| { kind: 'replay_drop'; epoch: number; peerIndex: number; ctr: string }
 	| { kind: 'epoch_advance'; from: number; to: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
 	| { type: 'ready' }
 	| { type: 'metrics'; event: MetricsEvent }
-	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch';
+	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch' | 'replay';
 		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string }
 	/**
 	 * Receiver installed/activated a new epoch (currentEpoch advanced). First-class
@@ -157,6 +169,19 @@ export interface WorkerState {
 	 * this does NOT widen attacker decryptability.
 	 */
 	ratchetWindowSize: number;
+	/**
+	 * Size of the per-(epoch, peerIndex) anti-replay sliding window
+	 * (RFC 9605 §9.3, issue #10). Default 64. 0 disables protection entirely
+	 * (check always returns true, accept is a no-op). Changed at runtime via the
+	 * `set-replay-window` control message.
+	 */
+	replayWindowSize: number;
+	/**
+	 * Per-(epoch, peerIndex) anti-replay windows. Outer key = epoch, inner key =
+	 * peerIndex. Windows are created lazily by decodeFrame / drainPreEpochQueue
+	 * and deleted by wipeEpoch() on epoch rotation. O(1) lookup.
+	 */
+	replayWindows: Map<number, Map<number, MediaReplayWindow>>;
 	/**
 	 * Optional SIF (Secure Interoperable Frame) trailer bytes.
 	 * When set, the encoder appends these bytes after the SFrame ciphertext, and the

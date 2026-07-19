@@ -36,6 +36,8 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		codec: undefined,
 		sifTrailer: undefined,
 		ratchetWindowSize: 8,
+		replayWindowSize: 64,
+		replayWindows: new Map(),
 		metricsEnabled: false,
 		now: () => performance.now(),
 		preEpochQueueCap: PRE_EPOCH_QUEUE_CAP,
@@ -82,6 +84,16 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 		case 'set-metrics-enabled':
 			state.metricsEnabled = msg.enabled;
 			return;
+		case 'set-replay-window': {
+			state.replayWindowSize = Math.max(0, Math.floor(msg.size));
+			// Existing windows were created with the old size — clear them all
+			// so subsequent frames get fresh windows at the new size.
+			for (const inner of state.replayWindows.values()) {
+				for (const w of inner.values()) w.clear();
+			}
+			state.replayWindows.clear();
+			return;
+		}
 		case 'teardown':
 			teardown(state);
 			return;
@@ -141,6 +153,10 @@ export function wipeEpoch(state: WorkerState, epoch: number): void {
 	// epoch is rejected without a decrypt attempt (spec §7.4).
 	state.epochs.delete(epoch);
 	state.wipeTimers.delete(epoch);
+	// Anti-replay windows for the wiped epoch are no longer needed — a frame
+	// at this epoch will be rejected by the stale-epoch gate before the replay
+	// check runs. Drop them to free memory (RFC 9605 §9.3, issue #10).
+	state.replayWindows.delete(epoch);
 	const nextValid = epoch + 1;
 	if (nextValid > state.currentMinValidEpoch) state.currentMinValidEpoch = nextValid;
 }
@@ -149,6 +165,7 @@ export function teardown(state: WorkerState): void {
 	for (const timer of state.wipeTimers.values()) clearTimeout(timer);
 	state.wipeTimers.clear();
 	state.epochs.clear();
+	state.replayWindows.clear();
 	state.preEpochQueue.length = 0; // discard queued pre-epoch frames on teardown
 	state.ctr = 0n;
 	state.currentEpoch = -1;
