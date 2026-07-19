@@ -23,6 +23,7 @@ import { SFrameError } from '../errors.ts';
 import { deriveAesKeyAndSalt, KeyDerivationCache } from './derive.ts';
 import { RandomCtrAllocator, MonotonicIdbCtrAllocator, type CtrAllocator } from './ctr-allocator.ts';
 import { SlidingReplayWindow } from './replay.ts';
+import { getOrCreateNested } from '../internal/collections.ts';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -176,17 +177,10 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 	const replayWindows = new Map<string, Map<string, SlidingReplayWindow>>();
 
 	function getReplayWindow(roomId: string, senderUid: string): SlidingReplayWindow {
-		let roomMap = replayWindows.get(roomId);
-		if (!roomMap) {
-			roomMap = new Map();
-			replayWindows.set(roomId, roomMap);
-		}
-		let w = roomMap.get(senderUid);
-		if (!w) {
-			w = new SlidingReplayWindow(replayWindow);
-			roomMap.set(senderUid, w);
-		}
-		return w;
+		return getOrCreateNested(
+			replayWindows, roomId, senderUid,
+			() => new SlidingReplayWindow(replayWindow),
+		);
 	}
 
 	async function seal(plaintext: Uint8Array, ctx: SealContext): Promise<Uint8Array> {

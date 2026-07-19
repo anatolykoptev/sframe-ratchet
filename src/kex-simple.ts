@@ -24,11 +24,12 @@ import {
 	suiteParams,
 } from './ratchet-crypto.ts';
 import { assertNotSimpleKex } from './strict-fips.ts';
+import { textEncoder } from './internal/buffer.ts';
 
 // Default salt — a static constant so the library works out-of-the-box.
 // Production MUST override with a unique random salt per room to prevent
 // cross-room key reuse.
-const DEFAULT_SALT = new TextEncoder().encode('sframe-ratchet/simple-kex/default-salt/v1');
+const DEFAULT_SALT = textEncoder.encode('sframe-ratchet/simple-kex/default-salt/v1');
 
 // HKDF info prefix for epoch key derivation.
 const EPOCH_INFO_PREFIX = 'sframe-simple-kex/epoch/';

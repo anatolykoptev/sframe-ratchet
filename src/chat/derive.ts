@@ -11,9 +11,9 @@
 //
 // See design doc §B.1.
 
-import { toArrayBuffer } from '../internal/buffer.ts';
+import { toArrayBuffer, concat2, textEncoder } from '../internal/buffer.ts';
 
-const enc = new TextEncoder();
+const enc = textEncoder;
 
 export interface DerivedKeys {
 	/** Non-extractable AES-128-GCM CryptoKey for encrypt+decrypt. */
@@ -120,8 +120,8 @@ export async function deriveAesKeyAndSalt(
 	const hkdfSalt = new Uint8Array(saltBuf);
 
 	// Build info byte strings
-	const infoKey = concat(enc.encode('sframe-chat/v1/aead|'), enc.encode(senderUid));
-	const infoSalt = concat(enc.encode('sframe-chat/v1/salt|'), enc.encode(senderUid));
+	const infoKey = concat2(enc.encode('sframe-chat/v1/aead|'), enc.encode(senderUid));
+	const infoSalt = concat2(enc.encode('sframe-chat/v1/salt|'), enc.encode(senderUid));
 
 	// Derive AES-128-GCM key (non-extractable)
 	const aesCryptoKey = await crypto.subtle.deriveKey(
@@ -156,12 +156,5 @@ export async function deriveAesKeyAndSalt(
 }
 
 // ---------------------------------------------------------------------------
-// Utility
+// Utility — concat2 is now imported from ../internal/buffer.ts
 // ---------------------------------------------------------------------------
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-	const out = new Uint8Array(a.length + b.length);
-	out.set(a, 0);
-	out.set(b, a.length);
-	return out;
-}

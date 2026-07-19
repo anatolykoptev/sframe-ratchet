@@ -40,6 +40,14 @@ export interface FrameCryptorOptions {
 	 */
 	onDecryptStarved?: (info: DecryptStarvedInfo) => void;
 	/**
+	 * Fires when the worker reports an internal error (previously silently
+	 * dropped — repo-review-council #29). Lets the app observe worker-side
+	 * failures (init/epoch/streams handler exceptions) that would otherwise
+	 * be invisible. The `detail` string is the worker's `String(err)` — no
+	 * key material, but may contain stack frames; treat as diagnostics only.
+	 */
+	onWorkerError?: (detail: string) => void;
+	/**
 	 * Optional override for the worker's pre-epoch frame-queue cap. A TUNING value
 	 * (NOT a security parameter); defaults to 50. Larger = more buffering before
 	 * frames are dropped during the pre-epoch window.
@@ -130,6 +138,7 @@ export class FrameCryptor {
 	readonly transitOnly: boolean;
 	private readonly onEpochAppliedCb?: (epoch: number) => void;
 	private readonly onDecryptStarvedCb?: (info: DecryptStarvedInfo) => void;
+	private readonly onWorkerErrorCb?: (detail: string) => void;
 	private readonly preEpochQueueCap?: number;
 	private readonly kidFormat?: KidFormat;
 	private readonly mlsConfig?: MlsKidConfig;
@@ -154,6 +163,7 @@ export class FrameCryptor {
 		this.currentPeerIndex = opts.peerIndex;
 		this.onEpochAppliedCb = opts.onEpochApplied;
 		this.onDecryptStarvedCb = opts.onDecryptStarved;
+		this.onWorkerErrorCb = opts.onWorkerError;
 		this.preEpochQueueCap = opts.preEpochQueueCap;
 		this.kidFormat = opts.kidFormat;
 		this.mlsConfig = opts.mlsConfig;
@@ -200,6 +210,14 @@ export class FrameCryptor {
 				framesDropped: d.framesDropped,
 				sinceMs: d.sinceMs,
 			});
+		} else if (data.type === 'error') {
+			// Worker-side exception (previously silently dropped —
+			// repo-review-council #29). Surface via callback so the app
+			// can observe worker failures (init/epoch/streams handler throws).
+			const d = data as { detail?: unknown };
+			const detail = typeof d.detail === 'string' ? d.detail : 'unknown worker error';
+			console.error('[frame-cryptor] worker error', detail);
+			this.onWorkerErrorCb?.(detail);
 		}
 	}
 

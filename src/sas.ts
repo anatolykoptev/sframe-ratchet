@@ -21,6 +21,7 @@
 //   - No timing-safe comparison needed in this layer (users compare visually).
 
 import { hkdfExtractExpand } from './ratchet-crypto.js';
+import { textEncoder } from './internal/buffer.ts';
 
 // ---- Types ----------------------------------------------------------------
 
@@ -45,7 +46,7 @@ export interface SasData {
  * domain-separates SAS bytes from all other HKDF outputs in the ratchet
  * (wrap keys, sender keys, ratchet-step keys).
  */
-const SAS_INFO = new TextEncoder().encode('sframe-ratchet-sas-v1');
+const SAS_INFO = textEncoder.encode('sframe-ratchet-sas-v1');
 
 /** Number of bytes derived from the DH secret via HKDF. */
 const SAS_BYTES_LENGTH = 6; // 48 bits — enough for 3×2-byte decimal + 7×6-bit emoji

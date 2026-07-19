@@ -71,8 +71,17 @@ export interface MlsRatchetProviderOptions {
 	 * Maximum SFrame epoch number (inclusive). Defaults to 0xFFFF (16-bit,
 	 * fixed KID format). For MLS KID format, set to `2^nEpochBits - 1`.
 	 * The provider throws RangeError if the MLS epoch exceeds this.
+	 * Defaults to 0xFFFF (16-bit, fixed KID format). When using MLS KID
+	 * format with nEpochBits > 16, set this to `2^nEpochBits - 1` or pass
+	 * `nEpochBits` to let the provider compute the default.
 	 */
 	maxEpoch?: number;
+	/**
+	 * MLS KID format epoch bit width. When provided and `maxEpoch` is not
+	 * explicitly set, the provider defaults `maxEpoch` to `2^nEpochBits - 1`
+	 * (repo-review-council #34).
+	 */
+	nEpochBits?: number;
 	/**
 	 * Maps an MLS LeafNode credential to a peerId string. The default uses
 	 * base64(credential.identity) for basic credentials, base64(signaturePublicKey)
@@ -144,11 +153,15 @@ export function createMlsRatchetProvider(opts: MlsRatchetProviderOptions): MlsRa
 		frameCryptor,
 		suite,
 		groupId,
-		maxEpoch = 0xFFFF,
+		nEpochBits,
 		credentialToPeerId = defaultCredentialToPeerId,
 		onEpochApplied,
 		onEpochAuthenticator,
 	} = opts;
+	// Default maxEpoch: 0xFFFF for fixed KID format (16-bit epoch),
+	// or 2^nEpochBits - 1 when nEpochBits is provided (MLS KID format).
+	// (repo-review-council #34)
+	const maxEpoch = opts.maxEpoch ?? (nEpochBits !== undefined ? (1 << nEpochBits) - 1 : 0xFFFF);
 
 	const { chainKeyBytes } = suiteParams(suite);
 	let disposed = false;

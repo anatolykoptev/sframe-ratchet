@@ -52,3 +52,36 @@ export function bufferSourceOf(u8: Uint8Array): BufferSource {
 	new Uint8Array(out).set(u8);
 	return out;
 }
+
+/**
+ * Zero-fill a Uint8Array in place. Use on sensitive key material (ChainKey,
+ * rawKey, DH secrets) before dropping the reference so the bytes don't linger
+ * in the JS heap until GC.
+ *
+ * Mirrors ts-mls's `zeroOutUint8Array` — kept local to avoid pulling ts-mls
+ * as a hard dependency of the core ECIES/worker paths.
+ */
+export function zeroize(u8: Uint8Array): void {
+	u8.fill(0);
+}
+
+/**
+ * Concatenate two Uint8Arrays into a fresh allocation.
+ *
+ * Replaces the inline 2-arg concat duplicated in `chat/derive.ts` and
+ * `ratchet-ids.ts` (repo-review-council NOISE finding).
+ */
+export function concat2(a: Uint8Array, b: Uint8Array): Uint8Array {
+	const out = new Uint8Array(a.byteLength + b.byteLength);
+	out.set(a, 0);
+	out.set(b, a.byteLength);
+	return out;
+}
+
+/**
+ * Shared TextEncoder for constant-string encoding across modules.
+ *
+ * `new TextEncoder()` is cheap but not free; reusing one instance avoids
+ * repeated construction in hot paths and constant initializers.
+ */
+export const textEncoder: TextEncoder = new TextEncoder();

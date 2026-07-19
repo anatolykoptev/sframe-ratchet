@@ -16,6 +16,7 @@ import {
 	wrapChainKey,
 	x25519Dh,
 } from './ratchet-crypto.ts';
+import { concat2, textEncoder } from './internal/buffer.ts';
 
 // --- KID schema (spec §6.1) -----------------------------------------------
 
@@ -59,8 +60,8 @@ export function joinKid(parts: { epoch: number; peerIndex: PeerIndex }): number 
  * revision note, the labels are `sframe/v1/key` (13 B) and `sframe/v1/salt`
  * (14 B), concatenated with `peer_index_be16` (2 B) for domain separation.
  */
-export const SFRAME_INFO_KEY = new TextEncoder().encode('sframe/v1/key'); // 13 B
-export const SFRAME_INFO_SALT = new TextEncoder().encode('sframe/v1/salt'); // 14 B
+export const SFRAME_INFO_KEY = textEncoder.encode('sframe/v1/key'); // 13 B
+export const SFRAME_INFO_SALT = textEncoder.encode('sframe/v1/salt'); // 14 B
 
 /** Encode a 16-bit peer_index as 2 big-endian bytes. */
 export function peerIndexBe16(peerIndex: PeerIndex): Uint8Array {
@@ -75,11 +76,7 @@ export function peerIndexBe16(peerIndex: PeerIndex): Uint8Array {
 
 /** Concatenate `base || peer_index_be16` to build the HKDF info parameter. */
 export function hkdfInfo(base: Uint8Array, peerIndex: PeerIndex): Uint8Array {
-	const pi = peerIndexBe16(peerIndex);
-	const out = new Uint8Array(base.length + pi.length);
-	out.set(base, 0);
-	out.set(pi, base.length);
-	return out;
+	return concat2(base, peerIndexBe16(peerIndex));
 }
 
 // --- peer_index_map invariant (spec §7.8) ---------------------------------

@@ -9,6 +9,7 @@ import type { PeerIndex, SFrameKey } from './types.ts';
 import { SFRAME_INFO_KEY, SFRAME_INFO_SALT, hkdfInfo } from './ratchet-ids.ts';
 import { FIXED_KID_CODEC, type KidCodec } from './kid-format.ts';
 import { toArrayBuffer as asArrayBuffer } from './internal/buffer.js';
+import { textEncoder } from './internal/buffer.ts';
 
 // ---- Cipher suite --------------------------------------------------------
 
@@ -58,7 +59,7 @@ export const SFRAME_SALT_BYTES = 12;
 // of the call-level cipher suite — it is not part of the RFC 9605 §4.5 suite
 // definition, which governs only the per-sender AEAD key schedule.
 const INFO_WRAP = (version: number) =>
-	new TextEncoder().encode(`oxpulse/sframe/v1/epoch-wrap/${version}`);
+	textEncoder.encode(`oxpulse/sframe/v1/epoch-wrap/${version}`);
 
 // --- X25519 DH (feature-detect WebCrypto, fall back to @noble/curves) ------
 
@@ -240,7 +241,7 @@ export function randomChainKey(suite: CipherSuite = DEFAULT_CIPHER_SUITE): Uint8
 // This is a FORWARD derivation: K_{n+1} = HKDF(K_n_raw, info="sframe/v1/ratchet-step").
 // The label is intentionally distinct from the per-sender key/salt labels so that
 // ratchet-step outputs cannot be confused with leaf AEAD key material.
-const SFRAME_INFO_RATCHET_STEP = new TextEncoder().encode('sframe/v1/ratchet-step');
+const SFRAME_INFO_RATCHET_STEP = textEncoder.encode('sframe/v1/ratchet-step');
 
 /**
  * Derive the NEXT per-sender AEAD bundle in the within-epoch ratchet chain.

@@ -76,7 +76,7 @@
     }
   },
   "devDependencies": {
-    "@noble/ciphers": "^2.1.1",
+    "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "fake-indexeddb": "^6.2.5",
@@ -85,6 +85,5 @@
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"
-  },
-  "dependencies": {}
+  }
 }
