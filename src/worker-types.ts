@@ -7,6 +7,7 @@
 import type { PeerIndex, SFrameKey } from './types.ts';
 import type { CipherSuite } from './ratchet-crypto.ts';
 import type { MediaReplayWindow } from './replay.ts';
+import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
 
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
@@ -33,7 +34,7 @@ export interface PerSenderKeyBundle {
 	rawKey: Uint8Array;
 }
 
-export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite; preEpochQueueCap?: number }
+export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite; preEpochQueueCap?: number; kidFormat?: KidFormat; mlsConfig?: MlsKidConfig }
 export interface EpochMsg {
 	type: 'epoch';
 	epoch: number;
@@ -157,6 +158,12 @@ export interface WorkerState {
 	selfPeerIndex: PeerIndex | null;
 	/** RFC 9605 §4.5 cipher suite active for this worker. */
 	suite: CipherSuite;
+	/**
+	 * KID codec (RFC 9605 §5.2 / §6.1). Defaults to the fixed 32-bit split.
+	 * Set to the MLS codec when the init message carries `kidFormat: 'mls'`.
+	 * Controls how (epoch, peerIndex) ↔ KID is encoded/decoded in the worker.
+	 */
+	kidCodec: KidCodec;
 	epochs: Map<number, EpochEntry>; // receive table (spec §4.3 L145)
 	currentEpoch: number;
 	currentMinValidEpoch: number; // stale-epoch gate (spec §7.4)

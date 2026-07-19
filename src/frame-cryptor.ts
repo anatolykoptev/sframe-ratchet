@@ -10,6 +10,7 @@
 import type { PeerIndex, SFrameSupport } from './types.ts';
 import { DEFAULT_CIPHER_SUITE, type CipherSuite, deriveEpochKeyTable } from './ratchet-crypto.ts';
 import { assertSuiteAllowed } from './strict-fips.ts';
+import { makeKidCodec, type KidFormat, type MlsKidConfig, type KidCodec } from './kid-format.ts';
 
 export { validatePeerIndexMap } from './ratchet-ids.ts';
 
@@ -44,6 +45,21 @@ export interface FrameCryptorOptions {
 	 * frames are dropped during the pre-epoch window.
 	 */
 	preEpochQueueCap?: number;
+	/**
+	 * KID encoding format (RFC 9605 §5.2 / §6.1). Defaults to `'fixed'`
+	 * (the historical 32-bit `(epoch << 16) | peerIndex` split). When set to
+	 * `'mls'`, the KID is encoded/decoded per the §5.2 MLS Key ID layout
+	 * using `mlsConfig`.
+	 *
+	 * SECURITY: all parties in a room MUST agree on kidFormat + bit widths
+	 * (signaling concern — same as suite agreement). No auto-negotiation.
+	 */
+	kidFormat?: KidFormat;
+	/**
+	 * MLS Key ID configuration (RFC 9605 §5.2). Required when `kidFormat` is
+	 * `'mls'`; ignored when `kidFormat` is `'fixed'` or unset.
+	 */
+	mlsConfig?: MlsKidConfig;
 }
 
 /** Payload for {@link FrameCryptorOptions.onDecryptStarved}. Stats only — no key material. */
@@ -115,6 +131,15 @@ export class FrameCryptor {
 	private readonly onEpochAppliedCb?: (epoch: number) => void;
 	private readonly onDecryptStarvedCb?: (info: DecryptStarvedInfo) => void;
 	private readonly preEpochQueueCap?: number;
+	private readonly kidFormat?: KidFormat;
+	private readonly mlsConfig?: MlsKidConfig;
+	/**
+	 * KID codec built from {@link kidFormat} + {@link mlsConfig} at construction
+	 * time. Passed to {@link deriveEpochKeyTable} so the per-sender keys derived
+	 * on the main thread carry the correct KID encoding (fixed or MLS) —
+	 * matching what the worker derives/uses via its own init-message codec.
+	 */
+	private readonly _kidCodec: KidCodec;
 	/** Last epoch the worker confirmed it applied; -1 until the first epoch_applied. */
 	private appliedEpoch = -1;
 	/** Bound worker→main message listener; removed in detach(). null when absent. */
@@ -130,6 +155,9 @@ export class FrameCryptor {
 		this.onEpochAppliedCb = opts.onEpochApplied;
 		this.onDecryptStarvedCb = opts.onDecryptStarved;
 		this.preEpochQueueCap = opts.preEpochQueueCap;
+		this.kidFormat = opts.kidFormat;
+		this.mlsConfig = opts.mlsConfig;
+		this._kidCodec = makeKidCodec(this.kidFormat ?? 'fixed', this.mlsConfig);
 		const { native, fallback } = supportsSFrame();
 		this.transitOnly = !native && !fallback;
 		this.installWorkerListener();
@@ -191,6 +219,7 @@ export class FrameCryptor {
 			type: 'init', role: this.role, peerId: this.peerId,
 			peerIndex: this.currentPeerIndex, suite: this.suite,
 			preEpochQueueCap: this.preEpochQueueCap,
+			kidFormat: this.kidFormat, mlsConfig: this.mlsConfig,
 		});
 		this.initialised = true;
 	}
@@ -301,7 +330,7 @@ export class FrameCryptor {
 		this.currentPeerIndex = selfPeerIndex;
 
 		const table = await deriveEpochKeyTable(
-			params.chainKey, params.epoch, params.peerIndexMap, this.suite,
+			params.chainKey, params.epoch, params.peerIndexMap, this.suite, this._kidCodec,
 		);
 		const bundles = new Map<PeerIndex, { cryptoKey: CryptoKey; salt: Uint8Array; rawKey: Uint8Array }>();
 		for (const [pi, k] of table) bundles.set(pi, { cryptoKey: k.cryptoKey, salt: k.salt, rawKey: k.rawKey });

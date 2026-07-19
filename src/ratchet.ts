@@ -29,8 +29,11 @@ import {
 	wrapChainKeyForPeer,
 } from './ratchet-ids.ts';
 import { computeSas, type SasData } from './sas.ts';
+import { makeKidCodec, type KidCodec, type KidFormat, type MlsKidConfig } from './kid-format.ts';
 
 export { joinKid, makeKid, newIdentity, splitKid, validatePeerIndexMap } from './ratchet-ids.ts';
+export type { KidFormat, MlsKidConfig, KidCodec } from './kid-format.ts';
+export { makeKidCodec, FIXED_KID_CODEC, encodeMlsKid, decodeMlsKid, validateMlsBitRange } from './kid-format.ts';
 
 /** Per-epoch state. Raw `chainKey` bytes are never logged. */
 interface EpochState {
@@ -69,6 +72,21 @@ export interface RoomRatchetOptions {
 	 * All members of a room MUST use the same suite.
 	 */
 	suite?: CipherSuite;
+	/**
+	 * KID encoding format (RFC 9605 §5.2 / §6.1). Defaults to `'fixed'`
+	 * (the historical 32-bit `(epoch << 16) | peerIndex` split). When set to
+	 * `'mls'`, the KID is encoded/decoded per the §5.2 MLS Key ID layout
+	 * using `mlsConfig`.
+	 *
+	 * SECURITY: all parties in a room MUST agree on kidFormat + bit widths
+	 * (signaling concern — same as suite agreement). No auto-negotiation.
+	 */
+	kidFormat?: KidFormat;
+	/**
+	 * MLS Key ID configuration (RFC 9605 §5.2). Required when `kidFormat` is
+	 * `'mls'`; ignored when `kidFormat` is `'fixed'` or unset.
+	 */
+	mlsConfig?: MlsKidConfig;
 }
 
 /**
@@ -82,6 +100,7 @@ export interface RoomRatchetOptions {
 export class RoomRatchet {
 	private readonly identity: IdentityKeyPair;
 	private readonly suite: CipherSuite;
+	private readonly _kidCodec: KidCodec;
 	private peers: Map<string, PeerIdentity>;
 	private epochs: Map<number, EpochState> = new Map();
 	private currentEpoch = -1;
@@ -98,6 +117,7 @@ export class RoomRatchet {
 		this.identity = opts.identity;
 		this.suite = opts.suite ?? DEFAULT_CIPHER_SUITE;
 		assertSuiteAllowed(this.suite);
+		this._kidCodec = makeKidCodec(opts.kidFormat, opts.mlsConfig);
 		this.peers = new Map();
 		for (const p of opts.initialPeers ?? []) this.peers.set(p.peerId, p);
 	}
@@ -184,7 +204,7 @@ export class RoomRatchet {
 		if (selfPeerIndex === undefined) {
 			throw new Error('ratchet: self peer_id missing from peer_index_map');
 		}
-		const keys = await deriveEpochKeyTable(chainKey, version, peerIndexMap, this.suite);
+		const keys = await deriveEpochKeyTable(chainKey, version, peerIndexMap, this.suite, this._kidCodec);
 		this.epochs.set(version, {
 			epoch: version, chainKey, peerIndexMap, selfPeerIndex, keys,
 		});
@@ -256,6 +276,9 @@ export class RoomRatchet {
 
 	/** Current epoch number, for diagnostics / signaling. */
 	get epoch(): number { return this.currentEpoch; }
+
+	/** The KID codec in use (fixed or mls). Read-only accessor for diagnostics. */
+	get kidCodec(): KidCodec { return this._kidCodec; }
 
 	/** Peer-index map for the current epoch. Returns empty object before first epoch.
 	 *  Used by debug diagnostics (installGroupCallDebugGetters) and by kxConsumerEpochs

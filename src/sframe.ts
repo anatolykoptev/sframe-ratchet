@@ -8,7 +8,7 @@
 
 import type { SFrameKey, SFrameKeyResolver } from './types.ts';
 import { parseHeader, serializeHeader } from './sframe-header.ts';
-import { splitKid } from './ratchet-ids.ts';
+import { FIXED_KID_CODEC, type KidCodec } from './kid-format.ts';
 import { toArrayBuffer as asArrayBuffer, bufferSourceOf } from './internal/buffer.js';
 import { AEADAuthError, KeyNotFoundError } from './errors.ts';
 
@@ -64,13 +64,14 @@ export async function sframeEncrypt(
 export async function sframeDecrypt(
 	sframe: Uint8Array,
 	resolveKey: SFrameKeyResolver,
-	_meta: { ctr_hint?: bigint } = {},
+	_meta: { ctr_hint?: bigint; kidCodec?: KidCodec } = {},
 ): Promise<Uint8Array> {
+	const kidCodec = _meta.kidCodec ?? FIXED_KID_CODEC;
 	const hdr = parseHeader(sframe);
 	if (sframe.length < hdr.bodyOffset + AEAD_TAG_BYTES) {
 		throw new AEADAuthError('sframe: frame too short for tag', { kid: hdr.kid, ctr: hdr.ctr });
 	}
-	const { epoch, peerIndex } = splitKid(hdr.kid);
+	const { epoch, peerIndex } = kidCodec.decode(hdr.kid);
 	const key = resolveKey({ kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr });
 	if (!key) {
 		throw new KeyNotFoundError(`sframe: key not found for kid=${hdr.kid}`, { kid: hdr.kid, epoch, peerIndex });

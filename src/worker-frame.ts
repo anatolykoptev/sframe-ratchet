@@ -11,7 +11,6 @@
 
 import { parseHeader, serializeHeader } from './sframe-header.ts';
 import { sframeDecrypt, sframeEncrypt, sframeEncryptInto } from './sframe.ts';
-import { splitKid } from './ratchet-ids.ts';
 import { deriveNextSenderKey } from './ratchet-crypto.ts';
 import { STARVE_COALESCE_MS, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
@@ -200,7 +199,7 @@ async function tryDecryptWithRatchet(
 		return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 			const ep = state.epochs.get(e);
 			return ep?.keys.get(pi) ?? null;
-		});
+		}, { kidCodec: state.kidCodec });
 	} catch (err) {
 		firstError = err;
 	}
@@ -227,7 +226,7 @@ async function tryDecryptWithRatchet(
 				return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				});
+				}, { kidCodec: state.kidCodec });
 			} catch {
 				// Step 0 still fails — our frame is at a different step than
 				// the one the first caller found. Fall through to our own
@@ -257,13 +256,13 @@ async function tryDecryptWithRatchet(
 		let currentRaw = currentKey.rawKey;
 		const salt = currentKey.salt;
 		for (let step = 1; step <= state.ratchetWindowSize; step++) {
-			const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex, state.suite);
+			const next = await deriveNextSenderKey(currentRaw, salt, epoch, peerIndex, state.suite, state.kidCodec);
 			try {
 				const plaintext = await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 					if (e === epoch && pi === peerIndex) return next;
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				});
+				}, { kidCodec: state.kidCodec });
 				// Success at step N: advance the cached key so subsequent frames at
 				// this step hit immediately without re-deriving.
 				entry.keys.set(peerIndex, next);
@@ -335,7 +334,7 @@ export async function decodeFrame(
 	let hdrCtr = 0n;
 	try {
 		const hdr = parseHeader(buf);
-		const { epoch, peerIndex } = splitKid(hdr.kid);
+		const { epoch, peerIndex } = state.kidCodec.decode(hdr.kid);
 		hdrKid = hdr.kid; hdrEpoch = epoch; hdrPeerIndex = peerIndex; hdrCtr = hdr.ctr;
 		// Stale-epoch gate — fire BEFORE any decrypt attempt (spec §7.4).
 		if (epoch < state.currentMinValidEpoch) {
@@ -569,7 +568,7 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				const buf = raw.subarray(N);
 
 				const hdr = parseHeader(buf);
-				const { epoch, peerIndex } = splitKid(hdr.kid);
+				const { epoch, peerIndex } = state.kidCodec.decode(hdr.kid);
 				if (epoch < state.currentMinValidEpoch) {
 					// Frame became stale while queued — discard silently (already
 					// past grace window; re-emitting decrypt_failure would spam).

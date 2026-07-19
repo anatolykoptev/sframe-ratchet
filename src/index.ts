@@ -71,6 +71,21 @@ export {
 } from './ratchet-ids.js';
 export type { PeerIndexMapValidation } from './ratchet-ids.js';
 
+// ---- KID format (RFC 9605 §5.2 MLS Key ID) --------------------------------
+export {
+	validateMlsBitRange,
+	encodeMlsKid,
+	decodeMlsKid,
+	makeKidCodec,
+	FIXED_KID_CODEC,
+} from './kid-format.js';
+export type {
+	KidFormat,
+	MlsKidBitRange,
+	MlsKidConfig,
+	KidCodec,
+} from './kid-format.js';
+
 // ---- Cipher suites (RFC 9605 §4.5) ----------------------------------------
 export type { CipherSuite } from './ratchet-crypto.js';
 export {

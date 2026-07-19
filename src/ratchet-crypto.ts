@@ -6,7 +6,8 @@
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import type { PeerIndex, SFrameKey } from './types.ts';
-import { SFRAME_INFO_KEY, SFRAME_INFO_SALT, hkdfInfo, makeKid } from './ratchet-ids.ts';
+import { SFRAME_INFO_KEY, SFRAME_INFO_SALT, hkdfInfo } from './ratchet-ids.ts';
+import { FIXED_KID_CODEC, type KidCodec } from './kid-format.ts';
 import { toArrayBuffer as asArrayBuffer } from './internal/buffer.js';
 
 // ---- Cipher suite --------------------------------------------------------
@@ -196,6 +197,7 @@ export async function deriveSenderKeys(
 	epoch: number,
 	peerIndex: PeerIndex,
 	suite: CipherSuite = DEFAULT_CIPHER_SUITE,
+	kidCodec: KidCodec = FIXED_KID_CODEC,
 ): Promise<SFrameKey & { rawKey: Uint8Array }> {
 	const params = suiteParams(suite);
 	if (chainKey.length !== params.chainKeyBytes) {
@@ -208,7 +210,7 @@ export async function deriveSenderKeys(
 		hkdfExtractExpand(chainKey, hkdfInfo(SFRAME_INFO_SALT, peerIndex), SFRAME_SALT_BYTES, params.hash),
 	]);
 	const cryptoKey = await importAesKey(asArrayBuffer(keyRaw), ['encrypt', 'decrypt']);
-	return { kid: makeKid(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: keyRaw };
+	return { kid: kidCodec.encode(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: keyRaw };
 }
 
 /** Derive per-sender bundles for every entry in `peerIndexMap` (spec §4.3 step 8). */
@@ -217,10 +219,11 @@ export async function deriveEpochKeyTable(
 	epoch: number,
 	peerIndexMap: Record<string, PeerIndex>,
 	suite: CipherSuite = DEFAULT_CIPHER_SUITE,
+	kidCodec: KidCodec = FIXED_KID_CODEC,
 ): Promise<Map<PeerIndex, SFrameKey & { rawKey: Uint8Array }>> {
 	const entries = await Promise.all(
 		Object.values(peerIndexMap).map(async (idx) => {
-			const key = await deriveSenderKeys(chainKey, epoch, idx, suite);
+			const key = await deriveSenderKeys(chainKey, epoch, idx, suite, kidCodec);
 			return [idx, key] as const;
 		}),
 	);
@@ -260,6 +263,7 @@ export async function deriveNextSenderKey(
 	epoch: number,
 	peerIndex: PeerIndex,
 	suite: CipherSuite = DEFAULT_CIPHER_SUITE,
+	kidCodec: KidCodec = FIXED_KID_CODEC,
 ): Promise<SFrameKey & { rawKey: Uint8Array }> {
 	const { hash, aeadKeyBytes } = suiteParams(suite);
 	const nextRaw = await hkdfExtractExpand(
@@ -269,5 +273,5 @@ export async function deriveNextSenderKey(
 		hash,
 	);
 	const cryptoKey = await importAesKey(asArrayBuffer(nextRaw), ['encrypt', 'decrypt']);
-	return { kid: makeKid(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: nextRaw };
+	return { kid: kidCodec.encode(epoch, peerIndex), epoch, peerIndex, cryptoKey, salt, rawKey: nextRaw };
 }

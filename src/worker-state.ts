@@ -5,7 +5,7 @@
 // DOM glue lives in worker.ts. This module is pure logic so it can be driven
 // from unit tests (sframe.smoke.test.ts) without spawning a real Worker.
 
-import { makeKid } from './ratchet-ids.ts';
+import { makeKidCodec, FIXED_KID_CODEC } from './kid-format.ts';
 import type { PeerIndex, SFrameKey } from './types.ts';
 import { drainPreEpochQueue, pipe } from './worker-frame.ts';
 import { emitMetric } from './metrics.ts';
@@ -25,6 +25,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		peerId: null,
 		selfPeerIndex: null,
 		suite: DEFAULT_CIPHER_SUITE,
+		kidCodec: FIXED_KID_CODEC,
 		epochs: new Map(),
 		currentEpoch: -1,
 		currentMinValidEpoch: 0,
@@ -59,6 +60,9 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			state.peerId = msg.peerId;
 			state.selfPeerIndex = msg.peerIndex;
 			if (msg.suite !== undefined) state.suite = msg.suite;
+			if (msg.kidFormat !== undefined) {
+				state.kidCodec = makeKidCodec(msg.kidFormat, msg.mlsConfig);
+			}
 			if (msg.preEpochQueueCap !== undefined && Number.isFinite(msg.preEpochQueueCap) && msg.preEpochQueueCap > 0) {
 				state.preEpochQueueCap = Math.floor(msg.preEpochQueueCap);
 			}
@@ -178,7 +182,7 @@ export function installEpoch(
 	const keys = new Map<PeerIndex, SFrameKey & { rawKey: Uint8Array }>();
 	for (const [pi, bundle] of bundles) {
 		keys.set(pi, {
-			kid: makeKid(epoch, pi),
+			kid: state.kidCodec.encode(epoch, pi),
 			epoch, peerIndex: pi,
 			cryptoKey: bundle.cryptoKey, salt: bundle.salt,
 			rawKey: bundle.rawKey,
