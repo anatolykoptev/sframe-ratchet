@@ -252,10 +252,12 @@ describe('concurrent ratchet dedup — rejection triggers own loop', () => {
 		expect(receiver.ratchetWindowSize).toBe(8);
 		installEpoch(receiver, epoch, senderPeerIndex, bundles);
 
-		// Frame 1 at step 9 (beyond window 8) → first caller's loop exhausts.
-		// Frame 2 at step 3 (within window 8) → second caller awaits the
-		// rejection, then starts its own loop and succeeds at step 3.
-		const frame1 = await encryptAtStep(chainKey, epoch, senderPeerIndex, 9, 0n, new Uint8Array([9]));
+		// Frame 1 at step 12 (beyond window 8 from any starting point) → caller's
+		// loop exhausts regardless of ordering. Step 12 ensures that even if
+		// frame 2 runs first and advances the cached key to step 3, frame 1's
+		// retry loop (steps 4-11) still can't reach step 12.
+		// Frame 2 at step 3 (within window 8) → succeeds via its own retry loop.
+		const frame1 = await encryptAtStep(chainKey, epoch, senderPeerIndex, 12, 0n, new Uint8Array([12]));
 		const frame2 = await encryptAtStep(chainKey, epoch, senderPeerIndex, 3, 1n, new Uint8Array([3]));
 
 		// Use allSettled — frame1 is expected to reject (window exhausted).
