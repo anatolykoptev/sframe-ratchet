@@ -1,0 +1,31 @@
+name: Fuzz (nightly)
+
+on:
+  schedule:
+    # 03:00 UTC daily — off-peak, doesn't compete with preflight CI
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  fuzz:
+    name: fast-check property tests (extended)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fuzz parseHeader + sframeDecrypt (extended runs)
+        run: npx vitest run src/__tests__/fuzz.parse-header.test.ts src/__tests__/fuzz.decrypt.test.ts
+        env:
+          # Nightly runs use higher numRuns than the default 100-1000 in the test files.
+          # fast-check reads FAST_CHECK_NUM_RUNS if the test uses fc.assert with
+          # numRuns from env; our tests hardcode numRuns, so this is a placeholder
+          # for a future env-aware numRuns upgrade.
+          FAST_CHECK_NUM_RUNS: 10000
