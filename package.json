@@ -77,8 +77,8 @@
   },
   "devDependencies": {
     "@noble/ciphers": "^2.1.1",
-    "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0",
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.9.0",
     "ts-mls": "^1.6.2",
