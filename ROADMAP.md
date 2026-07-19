@@ -37,8 +37,8 @@ On `decrypt_failed` for a known epoch, try ratcheting the key forward up to `rat
 ### ~~MLS Key ID format (RFC 9605 §5.2)~~ — DONE — #12
 Add `MlsKid` codec alongside the fixed 32-bit KID split (`src/ratchet-ids.ts`), gated behind `kidFormat: 'fixed' | 'mls'` (default `'fixed'`, backward compatible). Layout `[Context ID | Index | Epoch]` with configurable bit widths. Prerequisite for the MLS adapter — an external MLS provider produces §5.2 KIDs which we currently cannot parse. Pattern from `sframe-rs:src/mls/mls_key_id.rs:61`.
 
-### MLS adapter — L
-Add a `RoomRatchetProvider` seam in `types.ts` so an external KEX can deliver epoch material. Ship `sframe-ratchet/mls` as an optional sub-package wrapping `mls-rs` (WASM) or `openmls` once the latter has a stable browser target. Pattern from `sframe-rs/src/mls/` `MlsExporter` trait. **Unblocked** (MLS Key ID format #12 shipped).
+### ~~MLS adapter~~ — DONE
+Ship `sframe-ratchet/mls` as an optional subpath wrapping **ts-mls** (MIT, pure TypeScript, RFC 9420). A factory `createMlsRatchetProvider` bridges ts-mls `ClientState` → `FrameCryptor.setEpoch` — the same seam `RoomRatchet` (ECIES) uses. No new provider interface: `setEpoch` IS the seam. ChainKey derived via `mlsExporter(exporterSecret, 'sframe-ratchet/epoch', groupId||suiteByte, chainKeyBytes)`. `buildPeerIndexMap` reused from `ratchet-ids.ts`. ts-mls as optional peerDependency — default ECIES consumers unaffected. Architecture plan: `~/deploy/krolik-server/plans/sframe-ratchet/2026-07-19-mls-adapter-ts-mls-direct.md`.
 
 ### ~~Decryption-failure-driven key invalidation~~ — DONE — #14
 After N consecutive `AEADAuthError`s for the same `(epoch, peerIndex)`, mark the key invalid and drop subsequent frames without attempting AEAD. Configurable `failureTolerance` (default `-1` = unlimited, preserves current behavior). New `key_invalidated` metric event. Pattern from `livekit/client-sdk-js:ParticipantKeyHandler.ts:58` (`failureTolerance`, `decryptionFailureCounts`).
@@ -69,3 +69,4 @@ Fuzz `parseHeader` (`src/sframe-header.ts`) and `sframeDecrypt` (`src/sframe.ts`
 8. Anti-replay sliding window per (epoch, peerIndex) (`src/chat/replay.ts`).
 9. Failure-driven key invalidation with configurable tolerance.
 10. Concurrent ratchet dedup via in-flight promise map.
+11. MLS adapter (RFC 9420) via ts-mls — `sframe-ratchet/mls` optional subpath, `setEpoch` seam, exporter-derived ChainKey (`src/mls/index.ts`).
