@@ -30,8 +30,9 @@ import {
 } from './ratchet-ids.ts';
 import { computeSas, type SasData } from './sas.ts';
 import { makeKidCodec, type KidCodec, type KidFormat, type MlsKidConfig } from './kid-format.ts';
+import { zeroize } from './internal/buffer.ts';
 
-export { joinKid, makeKid, newIdentity, splitKid, validatePeerIndexMap } from './ratchet-ids.ts';
+export { makeKid, newIdentity, splitKid, validatePeerIndexMap } from './ratchet-ids.ts';
 export type { KidFormat, MlsKidConfig, KidCodec } from './kid-format.ts';
 export { makeKidCodec, FIXED_KID_CODEC, encodeMlsKid, decodeMlsKid, validateMlsBitRange } from './kid-format.ts';
 
@@ -269,8 +270,12 @@ export class RoomRatchet {
 		return this.startNewEpoch(Array.from(next.values()));
 	}
 
-	/** Drop an epoch's key material (spec §7.4 2 s grace expiry). */
+	/** Drop an epoch's key material (spec §7.4 2 s grace expiry).
+	 *  Zeroizes the ChainKey before dropping the reference so the raw bytes
+	 *  don't linger in the JS heap until GC (repo-review-council #31). */
 	forgetEpoch(epoch: number): void {
+		const state = this.epochs.get(epoch);
+		if (state) zeroize(state.chainKey);
 		this.epochs.delete(epoch);
 	}
 
@@ -342,6 +347,10 @@ export class RoomRatchet {
 	 */
 	private async installSas(peerId: string, epoch: number, dhSecret: Uint8Array): Promise<void> {
 		const data = await computeSas(dhSecret);
+		// Zeroize the raw DH secret — it was already used for deriveWrapKey by
+		// the caller and is no longer needed after SAS derivation.
+		// (repo-review-council #33)
+		zeroize(dhSecret);
 		this.sasState.set(peerId, { epoch, data, verified: false });
 		// Notify subscribers that SAS is available for this peer.
 		for (const cb of this.sasReadyCallbacks) {

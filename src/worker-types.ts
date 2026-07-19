@@ -6,7 +6,7 @@
 
 import type { PeerIndex, SFrameKey } from './types.ts';
 import type { CipherSuite } from './ratchet-crypto.ts';
-import type { SlidingReplayWindow } from './chat/replay.ts';
+import type { SlidingReplayWindow } from './internal/replay.ts';
 import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
 
 export type Role = 'sender' | 'receiver';

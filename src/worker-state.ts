@@ -8,6 +8,7 @@
 import { makeKidCodec, FIXED_KID_CODEC } from './kid-format.ts';
 import type { PeerIndex, SFrameKey } from './types.ts';
 import { drainPreEpochQueue, pipe } from './worker-frame.ts';
+import { zeroize } from './internal/buffer.ts';
 import { emitMetric } from './metrics.ts';
 import { DEFAULT_CIPHER_SUITE } from './ratchet-crypto.ts';
 import {
@@ -227,7 +228,15 @@ export function scheduleWipeOfEpochsBelow(state: WorkerState, newEpoch: number):
 }
 
 export function wipeEpoch(state: WorkerState, epoch: number): void {
-	// Drop the per-sender keys; GC reclaims the underlying CryptoKey/ChainKey.
+	// Zeroize raw AES key material before dropping the reference so the bytes
+	// don't linger in the JS heap until GC (repo-review-council #32).
+	const entry = state.epochs.get(epoch);
+	if (entry) {
+		for (const k of entry.keys.values()) {
+			if (k.rawKey) zeroize(k.rawKey);
+		}
+	}
+	// Drop the per-sender keys; GC reclaims the underlying CryptoKey.
 	// Also advance the stale-epoch gate so any late-arriving frame at this
 	// epoch is rejected without a decrypt attempt (spec §7.4).
 	state.epochs.delete(epoch);

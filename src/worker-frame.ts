@@ -18,7 +18,8 @@ import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
 import type { PeerIndex } from './types.ts';
 import { KeyNotFoundError, KeyInvalidError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError, AEADAuthError } from './errors.ts';
-import { SlidingReplayWindow } from './chat/replay.ts';
+import { SlidingReplayWindow } from './internal/replay.ts';
+import { getOrCreateNested } from './internal/collections.ts';
 import { emitMetric } from './metrics.ts';
 import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
 
@@ -28,17 +29,10 @@ import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
  * deleted by wipeEpoch() on epoch rotation. O(1) lookup.
  */
 function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): SlidingReplayWindow {
-	let inner = state.replayWindows.get(epoch);
-	if (!inner) {
-		inner = new Map();
-		state.replayWindows.set(epoch, inner);
-	}
-	let w = inner.get(peerIndex);
-	if (!w) {
-		w = new SlidingReplayWindow(state.replayWindowSize);
-		inner.set(peerIndex, w);
-	}
-	return w;
+	return getOrCreateNested(
+		state.replayWindows, epoch, peerIndex,
+		() => new SlidingReplayWindow(state.replayWindowSize),
+	);
 }
 
 export function pipe(
@@ -239,8 +233,20 @@ async function tryDecryptWithRatchet(
 		}
 	}
 
-	// No in-flight promise (or the previous one already settled). Run the
-	// retry loop under a dedup promise so concurrent callers await us
+	// No in-flight promise (or the previous one already settled). Before
+	// starting our own retry loop, re-check the map — another caller may have
+	// set a promise while we were suspended in the step-0 retry above
+	// (repo-review-council #30: race condition in ratchetPromises dedup).
+	const afterAwait = state.ratchetPromises.get(dedupKey);
+	if (afterAwait && afterAwait !== inFlight) {
+		try {
+			return await afterAwait;
+		} catch {
+			// That one also failed — fall through to our own retry loop.
+		}
+	}
+
+	// Run the retry loop under a dedup promise so concurrent callers await us
 	// instead of racing a parallel HKDF derivation.
 	const retryLoop = async (): Promise<Uint8Array> => {
 		// Re-fetch the current cached key — it may have been advanced by a
