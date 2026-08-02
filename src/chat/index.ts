@@ -8,9 +8,9 @@
 //
 // Threat model (see design doc §C):
 //   Defends: AEAD confidentiality+integrity, in-session sender auth via HKDF
-//            info, in-session replay (sliding window), cross-room key isolation.
-//   Does NOT defend: forward secrecy, post-compromise security, cross-session
-//            replay under random-64, traffic analysis.
+//            info, in-session replay (sliding window), cross-room key isolation,
+//            cross-reload replay when `durableReplay` is enabled (CWE-294).
+//   Does NOT defend: forward secrecy, post-compromise security, traffic analysis.
 //   WARNING: Symmetric AEAD only — any room member can forge messages from any
 //            other member. Sender non-repudiation requires sign-then-encrypt
 //            (v0.6+ roadmap item).
@@ -23,6 +23,7 @@ import { SFrameError } from '../errors.ts';
 import { deriveAesKeyAndSalt, KeyDerivationCache } from './derive.ts';
 import { RandomCtrAllocator, MonotonicIdbCtrAllocator, type CtrAllocator } from './ctr-allocator.ts';
 import { SlidingReplayWindow } from './replay.ts';
+import { DurableReplayGuard } from './durable-replay.ts';
 import { getOrCreateNested } from '../internal/collections.ts';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,40 @@ export interface ChatProviderOptions {
 	 * incorrectly reject most messages.
 	 */
 	replayWindow?: number;
+	/**
+	 * Enable durable, cross-reload receiver-side anti-replay (CWE-294).
+	 * Default: `false` (opt-in). When enabled, accepted CTRs are persisted to
+	 * IndexedDB so the replay defense survives a page reload — without it, a
+	 * malicious / compromised app-server can re-serve an OLD authentic sealed
+	 * frame under a fresh msg_id and it verifies (the ciphertext is genuinely
+	 * authentic, just old).
+	 *
+	 * Requires BOTH IndexedDB AND the Web Locks API. Degrades to a no-op
+	 * (with a one-time warning) when either is unavailable (SSR / Node /
+	 * legacy Safari <15.4). The in-memory `replayWindow` remains the
+	 * session-scoped backstop in that case.
+	 *
+	 * `namespace` is REQUIRED when enabled — it isolates independent
+	 * deployments sharing the same origin. Two deployments with the same
+	 * namespace and a colliding (roomId, senderUid) would share a replay
+	 * window and could false-reject each other.
+	 */
+	durableReplay?: boolean;
+	/**
+	 * Namespace for the durable replay IDB store. REQUIRED when
+	 * `durableReplay` is `true`. Isolates independent deployments sharing the
+	 * same origin. Use a per-tenant identifier (e.g. appId or tenantId).
+	 */
+	namespace?: string;
+	/**
+	 * Durable replay window size (distinct recent CTRs per sender per room,
+	 * persisted). Default: equals `replayWindow`. Must be <= `replayWindow`
+	 * — the in-memory window is the session-scoped backstop, and a durable
+	 * window LARGER than the in-memory one removes that backstop for the
+	 * extra span (reopens a narrow in-session replay window). `0` disables
+	 * the durable window (mirrors `replayWindow: 0`).
+	 */
+	durableReplayWindow?: number;
 	/** Called synchronously when rotate(roomId) is invoked. */
 	onKeyRotated?: (roomId: string) => void;
 }
@@ -163,6 +198,20 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 		throw new Error('createChatProvider: ctrKeyspace is required when ctrStrategy is monotonic-idb');
 	}
 
+	// Validate durable replay requirements (architecture-council nit #5: opt-in)
+	const durableReplayEnabled = opts.durableReplay === true;
+	if (durableReplayEnabled && !opts.namespace) {
+		throw new Error('createChatProvider: namespace is required when durableReplay is true');
+	}
+	const durableReplayWindow = opts.durableReplayWindow ?? replayWindow;
+	// Architecture-council nit #5: a durable window LARGER than the in-memory
+	// one removes the in-memory backstop for the extra span.
+	if (durableReplayEnabled && durableReplayWindow > replayWindow) {
+		throw new Error(
+			`createChatProvider: durableReplayWindow (${durableReplayWindow}) must be <= replayWindow (${replayWindow})`,
+		);
+	}
+
 	const allocator: CtrAllocator =
 		ctrStrategy === 'monotonic-idb'
 			? new MonotonicIdbCtrAllocator(opts.ctrKeyspace!)
@@ -176,11 +225,27 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 	// separator collision issues when IDs contain arbitrary characters.
 	const replayWindows = new Map<string, Map<string, SlidingReplayWindow>>();
 
+	// Durable cross-reload replay guard (CWE-294). Opt-in — default null.
+	// When enabled, persists accepted CTRs to IndexedDB so the replay defense
+	// survives a page reload. Feature-detected: no-op when IDB or Web Locks
+	// is unavailable (the in-memory window remains the session-scoped backstop).
+	const durable = durableReplayEnabled
+		? new DurableReplayGuard({
+				namespace: opts.namespace!,
+				window: durableReplayWindow,
+			})
+		: null;
+
 	function getReplayWindow(roomId: string, senderUid: string): SlidingReplayWindow {
 		return getOrCreateNested(
 			replayWindows, roomId, senderUid,
 			() => new SlidingReplayWindow(replayWindow),
 		);
+	}
+
+	/** Composite key for the durable guard — chat uses (roomId, senderUid). */
+	function durableKey(roomId: string, senderUid: string): string {
+		return `${roomId}|${senderUid}`;
 	}
 
 	async function seal(plaintext: Uint8Array, ctx: SealContext): Promise<Uint8Array> {
@@ -222,7 +287,9 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 		const hdr = parseHeader(sealed);
 		const ctr = hdr.ctr;
 
-		// Replay check before AEAD
+		// Replay check before AEAD. Architecture-council nit #1: in-memory
+		// check FIRST (cheap, synchronous), durable check only if in-memory
+		// passes (avoids the expensive IDB read on the common replay path).
 		const rw = getReplayWindow(roomId, senderUid);
 		if (!rw.check(ctr)) {
 			throw new ReplayError(
@@ -230,19 +297,44 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 				{ roomId, senderUid, ctr },
 			);
 		}
+		if (durable?.available) {
+			if (!(await durable.check(durableKey(roomId, senderUid), ctr))) {
+				throw new ReplayError(
+					`sframe-chat: durable cross-reload replay detected (ctr=${ctr}, room=${roomId}, uid=${senderUid})`,
+					{ roomId, senderUid, ctr },
+				);
+			}
+		}
 
 		const plaintext = await sframeDecrypt(sealed, () => sframeKey);
 
-		// Record CTR only after successful AEAD (prevents replay-set pollution on bad frames)
+		// Record CTR only after successful AEAD (prevents replay-set pollution
+		// on bad frames). In-memory first (synchronous), durable second (async
+		// write-through — non-fatal on failure, the in-memory window still
+		// defends this session).
 		rw.accept(ctr);
+		if (durable?.available) {
+			await durable.accept(durableKey(roomId, senderUid), ctr);
+		}
 		return plaintext;
 	}
 
 	function rotate(roomId: string): void {
 		// Evict derived-key cache for all (roomId, *) pairs
 		keyCache.evictRoom(roomId);
-		// Clear replay state for all senders in this room
+		// Clear in-memory replay state for all senders in this room
+		const senders = replayWindows.get(roomId);
 		replayWindows.delete(roomId);
+		// Clear durable replay state for all senders in this room
+		// (architecture-council nit #2: matching clear on key rotation so
+		// stale CTRs from the rotated key do not false-reject fresh frames
+		// under the new key). Best-effort — fire-and-forget; clear() swallows
+		// IDB errors internally.
+		if (durable?.available && senders) {
+			for (const senderUid of senders.keys()) {
+				void durable.clear(durableKey(roomId, senderUid));
+			}
+		}
 		// Notify caller
 		opts.onKeyRotated?.(roomId);
 	}
