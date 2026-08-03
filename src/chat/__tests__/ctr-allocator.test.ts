@@ -38,13 +38,17 @@ describe('MonotonicIdbCtrAllocator', () => {
 	});
 
 	it('throws when navigator.locks unavailable and allowSingleTab not set (issue #47)', () => {
-		// Temporarily remove navigator.locks to simulate legacy browser
-		const origLocks = navigator.locks;
+		// Simulate a legacy browser without navigator.locks.
+		// Node 20 has no navigator at all; Node 24 has it.
+		const origNavigator = (globalThis as Record<string, unknown>).navigator;
 		try {
-			Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true });
+			// Remove navigator entirely to simulate legacy env
+			delete (globalThis as Record<string, unknown>).navigator;
 			expect(() => new MonotonicIdbCtrAllocator('test-keyspace-nolocks')).toThrow('navigator.locks is unavailable');
 		} finally {
-			Object.defineProperty(navigator, 'locks', { value: origLocks, configurable: true });
+			if (origNavigator !== undefined) {
+				(globalThis as Record<string, unknown>).navigator = origNavigator;
+			}
 		}
 	});
 
