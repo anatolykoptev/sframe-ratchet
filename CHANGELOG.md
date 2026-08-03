@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.4...v0.5.5) (2026-08-03)
+
+
+### Fixed
+
+* address 13 bug-hunt followup issues ([#43](https://github.com/anatolykoptev/sframe-ratchet/issues/43)-[#56](https://github.com/anatolykoptev/sframe-ratchet/issues/56)) ([527fa6e](https://github.com/anatolykoptev/sframe-ratchet/commit/527fa6ec0f63c2c6601055d0b1969e78ec454b97))
+* **test:** navigator.locks test compat with Node 20 (no navigator) ([73e74e8](https://github.com/anatolykoptev/sframe-ratchet/commit/73e74e8170e1fcad5c15f192b965f6b8f4df8446))
+
 ## [0.5.4](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.3...v0.5.4) (2026-08-03)
 
 
