@@ -143,7 +143,7 @@ describe('createChatProvider — durable cross-reload replay (CWE-294)', () => {
 		}
 	});
 
-	it('regression: durableReplay disabled (default) — no IDB usage, replay only in-memory', async () => {
+	it('regression: durableReplay disabled (no namespace) — no IDB usage, replay only in-memory', async () => {
 		const key = await makeHkdfKey();
 		const sender = createChatProvider({ getKey: async () => key });
 		const frame = await sender.seal(pt('test'), { roomId: ROOM_ID, senderUid: SENDER_UID });
@@ -151,11 +151,34 @@ describe('createChatProvider — durable cross-reload replay (CWE-294)', () => {
 		const session1 = createChatProvider({ getKey: async () => key });
 		await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
 
-		// Reload — no durable replay, so the old frame is ACCEPTED (in-memory window wiped).
+		// Reload — no durable replay (no namespace provided), so the old frame
+		// is ACCEPTED (in-memory window wiped). This is the VULNERABLE behavior
+		// (CWE-294) — it persists when no namespace is provided. With a namespace,
+		// durable replay is now enabled by default (issue #41).
 		const session2 = createChatProvider({ getKey: async () => key });
-		// This is the VULNERABLE behavior (CWE-294) — documented as the default.
 		const out = await session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
 		expect(new Uint8Array(out)).toEqual(enc.encode('test'));
+	});
+
+	it('issue #41: durableReplay defaults to true when namespace is provided (no explicit flag)', async () => {
+		// The default changed from false to true in #41 — a caller providing
+		// a namespace WITHOUT setting durableReplay should get durable replay
+		// protection by default. A replayed frame after reload must be REJECTED.
+		const key = await makeHkdfKey();
+		const ns = freshNs();
+
+		const sender = createChatProvider({ getKey: async () => key });
+		const frame = await sender.seal(pt('default-protect'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+		// Session 1: receiver unseals an authentic frame (no explicit durableReplay flag).
+		const session1 = createChatProvider({ getKey: async () => key, namespace: ns });
+		await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+		// Reload — fresh provider, same key + namespace, NO explicit durableReplay flag.
+		// The default is now true → the replayed frame must be REJECTED.
+		const session2 = createChatProvider({ getKey: async () => key, namespace: ns });
+		await expect(session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }))
+			.rejects.toThrow(ReplayError);
 	});
 
 	it('throws when durableReplay is true but namespace is missing', () => {

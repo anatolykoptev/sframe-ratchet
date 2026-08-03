@@ -192,6 +192,14 @@ export interface WorkerState {
 	preEpochQueue: Array<QueuedFrame>;
 	/** Re-entrancy guard for drainPreEpochQueue — true while a drain is active. */
 	draining: boolean;
+	/**
+	 * Trailing-edge coalesce flag: when a second drainPreEpochQueue call
+	 * arrives while `draining` is true, this is set so the drain re-runs
+	 * once after the in-flight drain completes. Prevents orphaned frames
+	 * when two epoch messages interleave during a single drain pass
+	 * (issue #40). Pattern: schwepps/hanabi-intelligence-extension/drain.ts.
+	 */
+	pendingDrain: boolean;
 	emit: (msg: OutMsg) => void;
 	/** Per-track codec; drives codec-aware partial encryption.  Undefined = full encrypt. */
 	codec?: Codec;

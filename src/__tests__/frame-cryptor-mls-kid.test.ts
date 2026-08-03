@@ -35,7 +35,7 @@ describe('FrameCryptor KID codec wiring', () => {
 	it('constructs an MLS kidCodec when kidFormat="mls" + mlsConfig are provided', () => {
 		const { worker } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'mls', mlsConfig: MLS_CONFIG,
 		});
 		// Access the private _kidCodec field to verify it was built correctly.
@@ -50,7 +50,7 @@ describe('FrameCryptor KID codec wiring', () => {
 	it('constructs a fixed kidCodec by default (no kidFormat)', () => {
 		const { worker } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const codec = (cryptor as unknown as { _kidCodec: ReturnType<typeof makeKidCodec> })._kidCodec;
 		expect(codec.format).toBe('fixed');
@@ -60,7 +60,7 @@ describe('FrameCryptor KID codec wiring', () => {
 	it('constructs a fixed kidCodec when kidFormat="fixed" explicitly', () => {
 		const { worker } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'fixed',
 		});
 		const codec = (cryptor as unknown as { _kidCodec: ReturnType<typeof makeKidCodec> })._kidCodec;
@@ -70,7 +70,7 @@ describe('FrameCryptor KID codec wiring', () => {
 	it('throws when kidFormat="mls" but mlsConfig is omitted', () => {
 		const { worker } = makeCapturingWorker();
 		expect(() => new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'mls',
 		})).toThrow();
 	});
@@ -80,7 +80,7 @@ describe('FrameCryptor.setEpoch derives keys with MLS-encoded KIDs', () => {
 	it('setEpoch passes the MLS kidCodec to deriveEpochKeyTable', async () => {
 		const { worker, calls } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'self', peerIndex: 0,
+			worker, role: 'sender', peerId: 'self', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'mls', mlsConfig: MLS_CONFIG,
 		});
 
@@ -119,7 +119,7 @@ describe('FrameCryptor.setEpoch derives keys with MLS-encoded KIDs', () => {
 	it('setEpoch with fixed format produces fixed KIDs (unchanged behavior)', async () => {
 		const { worker, calls } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'receiver', peerId: 'self', peerIndex: 0,
+			worker, role: 'receiver', peerId: 'self', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'fixed',
 		});
 
@@ -143,7 +143,7 @@ describe('FrameCryptor.setEpoch derives keys with MLS-encoded KIDs', () => {
 	it('MLS-derived KIDs differ from fixed-derived KIDs for non-zero epoch', async () => {
 		const { worker } = makeCapturingWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'self', peerIndex: 0,
+			worker, role: 'sender', peerId: 'self', peerIndex: 0, allowTransitOnly: true,
 			kidFormat: 'mls', mlsConfig: MLS_CONFIG,
 		});
 
