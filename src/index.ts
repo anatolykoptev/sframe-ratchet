@@ -127,6 +127,14 @@ export type { SetSifTrailerMsg, SetReplayWindowMsg, SetFailureToleranceMsg } fro
 // chat frames. The alias preserves the public API name for media consumers.
 export { SlidingReplayWindow as MediaReplayWindow } from './chat/replay.js';
 
+// ---- Durable cross-reload replay protection (CWE-294) --------------------
+// DurableReplayGuard persists accepted CTRs to IndexedDB so the replay defense
+// survives a page/worker reload. Opt-in via ChatProviderOptions.durableReplay
+// or the worker init message. Feature-detected: no-op when IDB or Web Locks
+// is unavailable.
+export { DurableReplayGuard } from './chat/durable-replay.js';
+export type { DurableReplayGuardOptions } from './chat/durable-replay.js';
+
 // ---- Telemetry / observability --------------------------------------------
 export type { MetricsEvent } from './worker-types.js';
 

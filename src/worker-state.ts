@@ -11,6 +11,7 @@ import { drainPreEpochQueue, pipe } from './worker-frame.ts';
 import { zeroize } from './internal/buffer.ts';
 import { emitMetric } from './metrics.ts';
 import { DEFAULT_CIPHER_SUITE } from './ratchet-crypto.ts';
+import { DurableReplayGuard } from './chat/durable-replay.ts';
 import {
 	GRACE_WINDOW_MS,
 	PRE_EPOCH_QUEUE_CAP,
@@ -51,6 +52,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		failureCounts: new Map(),
 		failureTolerance: -1,
 		ratchetPromises: new Map(),
+		durableReplay: null,
 	};
 }
 
@@ -66,6 +68,27 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 			}
 			if (msg.preEpochQueueCap !== undefined && Number.isFinite(msg.preEpochQueueCap) && msg.preEpochQueueCap > 0) {
 				state.preEpochQueueCap = Math.floor(msg.preEpochQueueCap);
+			}
+			// Durable cross-reload replay guard for media frames (CWE-294).
+			// Opt-in — only constructed when `durableReplay: true` AND a
+			// namespace is supplied. Feature-detected internally: degrades to
+			// a no-op (available=false) when IDB or Web Locks is unavailable.
+			if (msg.durableReplay === true) {
+				if (!msg.durableReplayNamespace) {
+					throw new Error('worker init: durableReplayNamespace is required when durableReplay is true');
+				}
+				const durableWindow = msg.durableReplayWindow ?? state.replayWindowSize;
+				if (durableWindow > state.replayWindowSize) {
+					throw new Error(
+						`worker init: durableReplayWindow (${durableWindow}) must be <= replayWindowSize (${state.replayWindowSize})`,
+					);
+				}
+				state.durableReplay = new DurableReplayGuard({
+					namespace: msg.durableReplayNamespace,
+					window: durableWindow,
+				});
+			} else {
+				state.durableReplay = null;
 			}
 			state.emit({ type: 'ready' });
 			return;
@@ -122,6 +145,15 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
  */
 function failureKey(epoch: number, peerIndex: PeerIndex): string {
 	return `${epoch}:${peerIndex}`;
+}
+
+/**
+ * Build the durable replay guard key for (epoch, peerIndex). Distinct from
+ * `failureKey` (uses `|` not `:`) to avoid any collision with chat-mode keys
+ * that share the same guard instance shape.
+ */
+export function durableReplayKey(epoch: number, peerIndex: PeerIndex): string {
+	return `${epoch}|${peerIndex}`;
 }
 
 /**
@@ -245,6 +277,16 @@ export function wipeEpoch(state: WorkerState, epoch: number): void {
 	// at this epoch will be rejected by the stale-epoch gate before the replay
 	// check runs. Drop them to free memory (RFC 9605 §9.3, issue #10).
 	state.replayWindows.delete(epoch);
+	// Clear durable replay state for all peers in the wiped epoch
+	// (architecture-council nit #2: matching clear on epoch rotation so
+	// stale CTRs from the wiped epoch do not false-reject fresh frames under
+	// a new epoch's key). Best-effort — fire-and-forget; clear() swallows
+	// IDB errors internally. Per-peer keying matches the in-memory windows.
+	if (state.durableReplay?.available && entry) {
+		for (const peerIndex of entry.keys.keys()) {
+			void state.durableReplay.clear(durableReplayKey(epoch, peerIndex));
+		}
+	}
 	const nextValid = epoch + 1;
 	if (nextValid > state.currentMinValidEpoch) state.currentMinValidEpoch = nextValid;
 }
@@ -261,4 +303,9 @@ export function teardown(state: WorkerState): void {
 	state.selfPeerIndex = null;
 	state.failureCounts.clear();
 	state.ratchetPromises.clear();
+	// Drop the durable replay guard reference. The IDB store is NOT cleared
+	// here — teardown is a worker lifecycle event, not a key rotation. The
+	// store persists across worker restarts by design (that is the point of
+	// durable replay). A full clear would be a separate explicit operation.
+	state.durableReplay = null;
 }

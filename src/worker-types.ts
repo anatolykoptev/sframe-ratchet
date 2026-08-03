@@ -7,6 +7,7 @@
 import type { PeerIndex, SFrameKey } from './types.ts';
 import type { CipherSuite } from './ratchet-crypto.ts';
 import type { SlidingReplayWindow } from './internal/replay.ts';
+import type { DurableReplayGuard } from './chat/durable-replay.ts';
 import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
 
 export type Role = 'sender' | 'receiver';
@@ -34,7 +35,25 @@ export interface PerSenderKeyBundle {
 	rawKey: Uint8Array;
 }
 
-export interface InitMsg { type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex; suite?: CipherSuite; preEpochQueueCap?: number; kidFormat?: KidFormat; mlsConfig?: MlsKidConfig }
+export interface InitMsg {
+	type: 'init'; role: Role; peerId: string; peerIndex: PeerIndex;
+	suite?: CipherSuite; preEpochQueueCap?: number; kidFormat?: KidFormat; mlsConfig?: MlsKidConfig;
+	/**
+	 * Enable durable, cross-reload receiver-side anti-replay for media frames
+	 * (CWE-294). Default: false (opt-in). When true, `durableReplayNamespace`
+	 * is REQUIRED. The guard persists accepted CTRs to IndexedDB so the replay
+	 * defense survives a worker reload. Degrades to a no-op when IDB or Web
+	 * Locks is unavailable.
+	 */
+	durableReplay?: boolean;
+	/** Namespace for the durable replay IDB store. REQUIRED when durableReplay is true. */
+	durableReplayNamespace?: string;
+	/**
+	 * Durable replay window size per (epoch, peerIndex). Default: equals
+	 * `replayWindowSize`. Must be <= `replayWindowSize`.
+	 */
+	durableReplayWindow?: number;
+}
 export interface EpochMsg {
 	type: 'epoch';
 	epoch: number;
@@ -265,6 +284,13 @@ export interface WorkerState {
 	 * after the loop settles (success or exhaustion).
 	 */
 	ratchetPromises: Map<string, Promise<Uint8Array>>;
+	/**
+	 * Durable cross-reload replay guard for media frames (CWE-294). Opt-in —
+	 * default null. When present, persists accepted CTRs to IndexedDB so the
+	 * replay defense survives a worker reload. Feature-detected: no-op when
+	 * IDB or Web Locks is unavailable. Per-(epoch, peerIndex) keying.
+	 */
+	durableReplay: DurableReplayGuard | null;
 }
 
 export const GRACE_WINDOW_MS = 2000;

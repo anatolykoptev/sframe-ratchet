@@ -21,7 +21,7 @@ import { KeyNotFoundError, KeyInvalidError, QueueFullError, RatchetWindowExhaust
 import { SlidingReplayWindow } from './internal/replay.ts';
 import { getOrCreateNested } from './internal/collections.ts';
 import { emitMetric } from './metrics.ts';
-import { isKeyInvalid, recordFailure, recordSuccess } from './worker-state.ts';
+import { isKeyInvalid, recordFailure, recordSuccess, durableReplayKey } from './worker-state.ts';
 
 /**
  * Get or create the per-(epoch, peerIndex) anti-replay window (RFC 9605 §9.3,
@@ -375,6 +375,9 @@ export async function decodeFrame(
 		// AFTER parseHeader + stale-epoch gate, BEFORE AEAD. A replayed frame
 		// is rejected without consuming ratchet-retry budget or touching
 		// WebCrypto. accept() is called only after a successful decrypt below.
+		// Architecture-council nit #1: in-memory check FIRST (cheap, sync),
+		// durable check only if in-memory passes (avoids the expensive IDB
+		// read on the common replay path).
 		const replayWindow = getReplayWindow(state, epoch, peerIndex);
 		if (!replayWindow.check(hdr.ctr)) {
 			state.emit({
@@ -387,6 +390,25 @@ export async function decodeFrame(
 				`sframe: replay detected (epoch=${epoch} peer=${peerIndex} ctr=${hdr.ctr})`,
 				{ epoch, peerIndex, ctr: hdr.ctr },
 			);
+		}
+		// Durable cross-reload replay check (CWE-294). Only runs when the
+		// guard is present AND available (IDB + Web Locks). Catches a replayed
+		// frame whose CTR was accepted in a PRIOR session and survived a
+		// reload — the in-memory window was wiped on reload, so without this
+		// check the frame would false-pass.
+		if (state.durableReplay?.available) {
+			if (!(await state.durableReplay.check(durableReplayKey(epoch, peerIndex), hdr.ctr))) {
+				state.emit({
+					type: 'decrypt_failure', reason: 'replay',
+					kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+				});
+				emitMetric(state, { kind: 'queue_drop', reason: 'replay', epoch });
+				emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
+				throw new ReplayError(
+					`sframe: durable cross-reload replay detected (epoch=${epoch} peer=${peerIndex} ctr=${hdr.ctr})`,
+					{ epoch, peerIndex, ctr: hdr.ctr },
+				);
+			}
 		}
 
 		// Failure-invalidation gate (issue #14, pattern from livekit
@@ -412,6 +434,13 @@ export async function decodeFrame(
 		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 		// Record the CTR as seen ONLY after a successful AEAD decrypt.
 		replayWindow.accept(hdr.ctr);
+		// Durable accept — persist the CTR so the replay defense survives a
+		// worker reload (CWE-294). Only when the guard is present and
+		// available. Non-fatal on persist failure (the in-memory window still
+		// defends this session).
+		if (state.durableReplay?.available) {
+			await state.durableReplay.accept(durableReplayKey(epoch, peerIndex), hdr.ctr);
+		}
 		// A successful decrypt resets the consecutive AEAD failure count for
 		// this key (issue #14) — a single good frame clears the slate.
 		recordSuccess(state, epoch, peerIndex);
@@ -601,6 +630,20 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
 					continue; // drop the replayed frame; do not re-enqueue
 				}
+				// Durable cross-reload replay check (CWE-294) — same as decodeFrame.
+				// Architecture-council nit #1: in-memory check FIRST, durable only
+				// if in-memory passes.
+				if (state.durableReplay?.available) {
+					if (!(await state.durableReplay.check(durableReplayKey(epoch, peerIndex), hdr.ctr))) {
+						state.emit({
+							type: 'decrypt_failure', reason: 'replay',
+							kid: hdr.kid, epoch, peerIndex, ctr: hdr.ctr,
+						});
+						emitMetric(state, { kind: 'queue_drop', reason: 'replay', epoch });
+						emitMetric(state, { kind: 'replay_drop', epoch, peerIndex, ctr: hdr.ctr.toString() });
+						continue; // drop; do not re-enqueue
+					}
+				}
 				// Failure-invalidation gate (issue #14) — same as decodeFrame.
 				// AFTER replay check, BEFORE tryDecryptWithRatchet. A queued frame
 				// for an already-invalidated key is dropped without AEAD.
@@ -617,6 +660,11 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
 				// Record the CTR as seen ONLY after a successful AEAD decrypt.
 				replayWindow.accept(hdr.ctr);
+				// Durable accept — persist the CTR so the replay defense survives a
+				// worker reload (CWE-294). Non-fatal on persist failure.
+				if (state.durableReplay?.available) {
+					await state.durableReplay.accept(durableReplayKey(epoch, peerIndex), hdr.ctr);
+				}
 				// A successful decrypt resets the consecutive AEAD failure count.
 				recordSuccess(state, epoch, peerIndex);
 
