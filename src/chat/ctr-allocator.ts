@@ -25,13 +25,35 @@ export interface CtrAllocator {
  *
  * @remarks Birthday bound: expect first collision after ~2^32 messages per
  * (roomId, senderUid) under the same HKDF-derived key. Rotate the base key
- * (via SDK) to reset the CTR space.
+ * (via SDK) to reset the CTR space. A one-time console.warn fires at 75% of
+ * the birthday bound (~3.2 billion frames per (roomId, senderUid)) to alert
+ * operators before the risk becomes non-negligible (issue #44).
  */
 export class RandomCtrAllocator implements CtrAllocator {
-	async next(_roomId: string, _senderUid: string): Promise<bigint> {
+	/** Per-(roomId, senderUid) frame counter for birthday-bound warning. */
+	private readonly counts = new Map<string, number>();
+	private warned = false;
+	private static readonly BIRTHDAY_WARN_THRESHOLD = 2n ** 32n * 3n / 4n; // ~3.2B
+
+	async next(roomId: string, senderUid: string): Promise<bigint> {
 		// getRandomValues fills a BigUint64Array with uniform 64-bit unsigned values.
 		const buf = new BigUint64Array(1);
 		crypto.getRandomValues(buf);
+		// Issue #44: track frame count per (roomId, senderUid) and warn once
+		// when approaching the birthday bound (~2^32 messages).
+		if (!this.warned) {
+			const key = `${roomId}|${senderUid}`;
+			const count = (this.counts.get(key) ?? 0) + 1;
+			this.counts.set(key, count);
+			if (BigInt(count) > RandomCtrAllocator.BIRTHDAY_WARN_THRESHOLD) {
+				this.warned = true;
+				console.warn(
+					'[sframe-ratchet] Random CTR birthday bound approaching for ' +
+					`(${roomId}, ${senderUid}): ${count} frames sent under the same key. ` +
+					'Rotate the base key to reset the CTR space (issue #44).',
+				);
+			}
+		}
 		return buf[0];
 	}
 }
@@ -111,13 +133,32 @@ async function atomicIncrement(db: IDBDatabase, idbKey: string): Promise<bigint>
  */
 export class MonotonicIdbCtrAllocator implements CtrAllocator {
 	private readonly keyspace: string;
+	private readonly allowSingleTab: boolean;
 	private dbPromise: Promise<IDBDatabase> | null = null;
 
-	constructor(keyspace: string) {
+	/**
+	 * @param keyspace Isolates counter stores per deployment/session.
+	 * @param opts.allowSingleTab When `false` (default), throws if
+	 * `navigator.locks` is unavailable — the single-tab fallback does NOT
+	 * protect against concurrent tab writes and can cause CTR reuse (issue
+	 * #47). Set to `true` for test environments where multi-tab safety is
+	 * not required.
+	 */
+	constructor(keyspace: string, opts?: { allowSingleTab?: boolean }) {
 		if (!keyspace) {
 			throw new Error('MonotonicIdbCtrAllocator: ctrKeyspace is required');
 		}
 		this.keyspace = keyspace;
+		this.allowSingleTab = opts?.allowSingleTab ?? false;
+		const hasLocks =
+			typeof navigator !== 'undefined' && navigator.locks != null;
+		if (!hasLocks && !this.allowSingleTab) {
+			throw new Error(
+				'MonotonicIdbCtrAllocator: navigator.locks is unavailable — ' +
+				'multi-tab CTR safety cannot be guaranteed. Set `allowSingleTab: true` ' +
+				'in the constructor options for test environments only (issue #47).',
+			);
+		}
 	}
 
 	private db(): Promise<IDBDatabase> {

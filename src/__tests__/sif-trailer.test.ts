@@ -250,4 +250,33 @@ describe('pathological short frame', () => {
 		await expect(decodeFrame(receiver, emptyFrame)).resolves.toBeUndefined();
 		expect(new Uint8Array(emptyFrame.data)).toHaveLength(0);
 	});
+
+	it('frame exactly trailer length → trailer stripped, empty buffer → HeaderParseError (issue #55 boundary)', async () => {
+		const receiver = createWorkerState(() => {});
+		const trailer = getDefaultSifTrailer(); // 9 bytes
+		receiver.sifTrailer = trailer;
+
+		// Frame exactly the same length as the trailer — ctEndsWith returns true,
+		// the trailer is stripped, leaving an empty buffer → HeaderParseError.
+		// This is correct behavior: the frame was detected as SFrame (trailer
+		// present) but has no SFrame header after stripping.
+		const exactFrame = makeFrame(new Uint8Array(trailer));
+		await expect(decodeFrame(receiver, exactFrame)).rejects.toThrow('empty buffer');
+	});
+
+	it('frame one byte longer than trailer → pass-through (issue #55 boundary)', async () => {
+		const receiver = createWorkerState(() => {});
+		const trailer = getDefaultSifTrailer();
+		receiver.sifTrailer = trailer;
+
+		// One byte longer than trailer — not a real SFrame frame, just pass through
+		const data = new Uint8Array(trailer.length + 1);
+		data.set(trailer, 0);
+		data[trailer.length] = 0x42;
+		const oneLonger = makeFrame(data);
+		const originalData = new Uint8Array(oneLonger.data).slice();
+
+		await expect(decodeFrame(receiver, oneLonger)).resolves.toBeUndefined();
+		expect(new Uint8Array(oneLonger.data)).toEqual(originalData);
+	});
 });

@@ -431,4 +431,21 @@ describe('RoomRatchet.onSasReady', () => {
 
 		expect(bobFired).toContain(alicePeer.peerId);
 	});
+
+	it('a throwing callback does not break subsequent callbacks (issue #54)', async () => {
+		const aliceId = newIdentity('alice');
+		const bobId = newIdentity('bob');
+		const bobPeer: PeerIdentity = { peerId: bobId.peerId, publicKey: bobId.publicKey };
+
+		const alice = new RoomRatchet({ identity: aliceId, initialPeers: [bobPeer] });
+
+		const order: string[] = [];
+		alice.onSasReady(() => { order.push('first'); throw new Error('boom'); });
+		alice.onSasReady(() => { order.push('second'); });
+
+		await alice.startNewEpoch([bobPeer]);
+
+		// Both callbacks ran despite the first throwing
+		expect(order).toEqual(['first', 'second']);
+	});
 });

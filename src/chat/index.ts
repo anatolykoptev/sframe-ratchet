@@ -228,7 +228,7 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 
 	const allocator: CtrAllocator =
 		ctrStrategy === 'monotonic-idb'
-			? new MonotonicIdbCtrAllocator(opts.ctrKeyspace!)
+			? new MonotonicIdbCtrAllocator(opts.ctrKeyspace!, { allowSingleTab: true })
 			: new RandomCtrAllocator();
 
 	// Instance-scoped key derivation cache (LRU, max 256 entries)
@@ -238,6 +238,16 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 	// Map<roomId, Map<senderUid, SlidingReplayWindow>> — two-level to avoid
 	// separator collision issues when IDs contain arbitrary characters.
 	const replayWindows = new Map<string, Map<string, SlidingReplayWindow>>();
+	// Issue #48: cap the number of tracked rooms to prevent unbounded growth.
+	// When the cap is exceeded, the oldest room (by insertion order) is evicted.
+	const MAX_REPLAY_ROOMS = 1024;
+	function evictOldReplayRooms(): void {
+		while (replayWindows.size > MAX_REPLAY_ROOMS) {
+			const oldest = replayWindows.keys().next().value;
+			if (oldest === undefined) break;
+			replayWindows.delete(oldest);
+		}
+	}
 
 	// Durable cross-reload replay guard (CWE-294). Opt-in — default null.
 	// When enabled, persists accepted CTRs to IndexedDB so the replay defense
@@ -251,10 +261,13 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 		: null;
 
 	function getReplayWindow(roomId: string, senderUid: string): SlidingReplayWindow {
-		return getOrCreateNested(
+		const isNew = !replayWindows.has(roomId);
+		const w = getOrCreateNested(
 			replayWindows, roomId, senderUid,
 			() => new SlidingReplayWindow(replayWindow),
 		);
+		if (isNew) evictOldReplayRooms();
+		return w;
 	}
 
 	/** Composite key for the durable guard — chat uses (roomId, senderUid). */
