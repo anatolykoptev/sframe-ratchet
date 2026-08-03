@@ -23,7 +23,7 @@ describe('FrameCryptor transit-only mode', () => {
 
 	it('transitOnly is true when no SFrame APIs are present', () => {
 		const cryptor = new FrameCryptor({
-			worker: makeWorker(), role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker: makeWorker(), role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		expect(cryptor.transitOnly).toBe(true);
 	});
@@ -31,7 +31,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('attachSender does not throw in transit-only mode', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const sender = {} as RTCRtpSender;
 		expect(() => cryptor.attachSender(sender)).not.toThrow();
@@ -40,7 +40,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('attachSender does not post init message to worker in transit-only mode', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const sender = {} as RTCRtpSender;
 		cryptor.attachSender(sender);
@@ -51,7 +51,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('attachReceiver does not throw in transit-only mode', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const receiver = {} as RTCRtpReceiver;
 		expect(() => cryptor.attachReceiver(receiver)).not.toThrow();
@@ -60,7 +60,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('attachReceiver does not post init message in transit-only mode', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const receiver = {} as RTCRtpReceiver;
 		cryptor.attachReceiver(receiver);
@@ -70,7 +70,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('detach is safe when nothing was attached (transit-only)', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		expect(() => cryptor.detach()).not.toThrow();
 		// No teardown message posted since worker was never init'd
@@ -80,7 +80,7 @@ describe('FrameCryptor transit-only mode', () => {
 	it('multiple attachSender calls in transit-only mode do not accumulate detach callbacks', () => {
 		const worker = makeWorker();
 		const cryptor = new FrameCryptor({
-			worker, role: 'sender', peerId: 'p1', peerIndex: 0,
+			worker, role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 		});
 		const sender = {} as RTCRtpSender;
 		cryptor.attachSender(sender);
@@ -88,5 +88,23 @@ describe('FrameCryptor transit-only mode', () => {
 		cryptor.attachSender(sender);
 		// detach with no attached transforms — should still be safe
 		expect(() => cryptor.detach()).not.toThrow();
+	});
+
+	it('throws by default when SFrame APIs unavailable and allowTransitOnly not set (issue #42)', () => {
+		// The constructor must throw to prevent silent downgrade to DTLS-only.
+		// Callers who intentionally want transit-only must set allowTransitOnly: true.
+		expect(() =>
+			new FrameCryptor({
+				worker: makeWorker(), role: 'sender', peerId: 'p1', peerIndex: 0,
+			}),
+		).toThrow('SFrame E2E encryption is unavailable');
+	});
+
+	it('does not throw when allowTransitOnly: true even with no SFrame APIs', () => {
+		expect(() =>
+			new FrameCryptor({
+				worker: makeWorker(), role: 'sender', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
+			}),
+		).not.toThrow();
 	});
 });

@@ -579,10 +579,15 @@ function enqueuePreEpoch(
  * fail (e.g. they were for a different epoch not yet available) stay queued.
  */
 export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
-	// Re-entrancy guard: if another drain is already running (concurrent epoch
-	// message or rotate arriving mid-await), return early. The next installEpoch
-	// will trigger a fresh drain call — correct path, no frames lost.
-	if (state.draining) return;
+	// Trailing-edge coalesce re-entrancy guard (issue #40, pattern:
+	// schwepps/hanabi-intelligence-extension/drain.ts). If a second drain
+	// arrives while one is already running, set pendingDrain and return.
+	// The in-flight drain re-runs once in its finally block if the flag is
+	// set — preventing orphaned frames when two epoch messages interleave.
+	if (state.draining) {
+		state.pendingDrain = true;
+		return;
+	}
 	state.draining = true;
 	try {
 		// Single-pass snapshot: take all currently queued frames and clear the queue.
@@ -696,6 +701,12 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 		}
 	} finally {
 		state.draining = false;
+		// Trailing-edge coalesce: if a second drain arrived while we were
+		// running, re-run once to pick up frames it would have processed.
+		if (state.pendingDrain) {
+			state.pendingDrain = false;
+			void drainPreEpochQueue(state);
+		}
 	}
 }
 

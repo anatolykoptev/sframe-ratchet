@@ -68,6 +68,15 @@ export interface FrameCryptorOptions {
 	 * `'mls'`; ignored when `kidFormat` is `'fixed'` or unset.
 	 */
 	mlsConfig?: MlsKidConfig;
+	/**
+	 * Explicitly allow transit-only mode (no SFrame E2E encryption, only DTLS
+	 * transport-layer encryption). By default the constructor THROWS when the
+	 * browser exposes neither `RTCRtpScriptTransform` nor `createEncodedStreams`
+	 * (issue #42: silent downgrade to DTLS-only is a security surprise). Set
+	 * to `true` only when you intentionally want a non-E2E fallback path and
+	 * have surfaced the trade-off to the user.
+	 */
+	allowTransitOnly?: boolean;
 }
 
 /** Payload for {@link FrameCryptorOptions.onDecryptStarved}. Stats only — no key material. */
@@ -170,6 +179,17 @@ export class FrameCryptor {
 		this._kidCodec = makeKidCodec(this.kidFormat ?? 'fixed', this.mlsConfig);
 		const { native, fallback } = supportsSFrame();
 		this.transitOnly = !native && !fallback;
+		// Issue #42: throw by default when SFrame transforms cannot be installed
+		// — silent downgrade to DTLS-only is a security surprise. Callers who
+		// intentionally want a non-E2E fallback must set `allowTransitOnly: true`.
+		if (this.transitOnly && !opts.allowTransitOnly) {
+			throw new Error(
+				'FrameCryptor: browser exposes neither RTCRtpScriptTransform nor ' +
+				'createEncodedStreams — SFrame E2E encryption is unavailable. ' +
+				'Set `allowTransitOnly: true` in FrameCryptorOptions to explicitly ' +
+				'opt into transit-only mode (DTLS transport encryption only).',
+			);
+		}
 		this.installWorkerListener();
 	}
 

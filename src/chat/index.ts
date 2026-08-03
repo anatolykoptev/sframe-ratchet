@@ -84,6 +84,10 @@ export interface ChatProviderOptions {
 	 * deployments sharing the same origin. Two deployments with the same
 	 * namespace and a colliding (roomId, senderUid) would share a replay
 	 * window and could false-reject each other.
+	 *
+	 * Defaults to `true` when a `namespace` is provided (issue #41: the
+	 * previous default of `false` left the cross-reload replay vulnerability
+	 * CWE-294 open by default). Set to `false` to explicitly opt out.
 	 */
 	durableReplay?: boolean;
 	/**
@@ -198,10 +202,20 @@ export function createChatProvider(opts: ChatProviderOptions): ChatSFrameProvide
 		throw new Error('createChatProvider: ctrKeyspace is required when ctrStrategy is monotonic-idb');
 	}
 
-	// Validate durable replay requirements (architecture-council nit #5: opt-in)
-	const durableReplayEnabled = opts.durableReplay === true;
-	if (durableReplayEnabled && !opts.namespace) {
+	// Durable replay defaults to ENABLED when a namespace is provided (issue
+	// #41: the previous opt-in default left CWE-294 cross-reload replay open
+	// by default). Explicit `durableReplay: false` opts out. Without a
+	// namespace the guard cannot be constructed — warn unless the caller
+	// explicitly set durableReplay: true (which is a hard error).
+	if (opts.durableReplay === true && !opts.namespace) {
 		throw new Error('createChatProvider: namespace is required when durableReplay is true');
+	}
+	const durableReplayEnabled = opts.durableReplay !== false && !!opts.namespace;
+	if (!durableReplayEnabled && opts.durableReplay !== false && !opts.namespace) {
+		console.warn(
+			'createChatProvider: durableReplay defaults to true but no namespace provided — ' +
+			'cross-reload replay protection (CWE-294) is DISABLED. Provide a namespace to enable it.',
+		);
 	}
 	const durableReplayWindow = opts.durableReplayWindow ?? replayWindow;
 	// Architecture-council nit #5: a durable window LARGER than the in-memory
