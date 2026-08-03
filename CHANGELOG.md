@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.3...v0.5.4) (2026-08-03)
+
+
+### Fixed
+
+* pendingDrain flag, durable replay default, transit-only throw ([89cfc67](https://github.com/anatolykoptev/sframe-ratchet/commit/89cfc671b28160dba25fa220b174114fc3f9937a))
+
 ## [0.5.3](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.2...v0.5.3) (2026-08-03)
 
 
