@@ -364,4 +364,47 @@ describe('Scenario 5: drainPreEpochQueue re-entrant drain guard', () => {
 		await drainPreEpochQueue(receiver);
 		expect(receiver.preEpochQueue).toHaveLength(0);
 	});
+
+	it('pendingDrain flag: second drain during first re-runs after first completes (no orphaned frames)', async () => {
+		// BUG #40: without a pendingDrain flag, a second drainPreEpochQueue call
+		// that arrives while the first is still running returns early and the
+		// frames it would have drained remain orphaned until another epoch
+		// arrives. The pendingDrain flag (trailing-edge coalesce pattern) ensures
+		// the drain re-runs once after the first completes.
+		const emitted: OutMsg[] = [];
+		const sender = createWorkerState((_m) => {});
+		const receiver = createWorkerState((m) => emitted.push(m));
+
+		const ck = randomChainKey();
+		const b = await makeBundles(ck, 0, PEER_MAP);
+		await handleMessage(sender, { type: 'epoch', epoch: 0, peerIndexMap: PEER_MAP, selfPeerIndex: 0, keys: b });
+		installEpoch(receiver, 0, 1, b);
+
+		// Frame A — decryptable with epoch 0 key.
+		const fa = makeFrame(new TextEncoder().encode('pending-drain-a'));
+		await encodeFrame(sender, fa);
+		receiver.preEpochQueue.push({ frame: makeFrame(new Uint8Array(fa.data)) });
+
+		// Start drain1 — it snapshots [A] and begins async decrypt.
+		const drain1 = drainPreEpochQueue(receiver);
+
+		// While drain1 is running: push frame B and call drain2.
+		// drain2 should set pendingDrain=true and return immediately.
+		const fb = makeFrame(new TextEncoder().encode('pending-drain-b'));
+		await encodeFrame(sender, fb);
+		receiver.preEpochQueue.push({ frame: makeFrame(new Uint8Array(fb.data)) });
+		const drain2 = drainPreEpochQueue(receiver);
+
+		// Wait for both to settle. With the fix: drain1 finishes → pendingDrain
+		// triggers a re-run → frame B is consumed. Without the fix: B is orphaned.
+		await Promise.all([drain1, drain2]);
+
+		// Both frames must be consumed — no orphans.
+		expect(receiver.preEpochQueue).toHaveLength(0);
+		expect(receiver.draining).toBe(false);
+		expect(receiver.pendingDrain).toBe(false);
+		// Two successful decrypts → two epoch_applied or decrypt_success signals.
+		// We check no decrypt failures occurred.
+		expect(emitted.filter((m) => m.type === 'decrypt_failure')).toHaveLength(0);
+	});
 });

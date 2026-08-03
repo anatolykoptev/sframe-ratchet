@@ -100,7 +100,7 @@ function makeObservableWorker(): ObservableWorker {
 describe('A. FrameCryptor receiver epoch observation', () => {
 	it('getAppliedEpoch() is -1 before any epoch, then reflects epoch_applied', () => {
 		const w = makeObservableWorker();
-		const c = new FrameCryptor({ worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0 });
+		const c = new FrameCryptor({ worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true });
 		expect(c.getAppliedEpoch()).toBe(-1);
 		w.dispatch({ type: 'epoch_applied', epoch: 3 });
 		expect(c.getAppliedEpoch()).toBe(3);
@@ -111,7 +111,7 @@ describe('A. FrameCryptor receiver epoch observation', () => {
 		const seen: number[] = [];
 		const w = makeObservableWorker();
 		const c = new FrameCryptor({
-			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			onEpochApplied: (e) => seen.push(e),
 		});
 		w.dispatch({ type: 'epoch_applied', epoch: 7 });
@@ -123,7 +123,7 @@ describe('A. FrameCryptor receiver epoch observation', () => {
 		const seen: number[] = [];
 		const w = makeObservableWorker();
 		const c = new FrameCryptor({
-			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			onEpochApplied: (e) => seen.push(e),
 		});
 		w.dispatch({ type: 'ready' });
@@ -136,7 +136,7 @@ describe('A. FrameCryptor receiver epoch observation', () => {
 	it('detach removes the worker message listener', () => {
 		const w = makeObservableWorker();
 		const c = new FrameCryptor({
-			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			onEpochApplied: () => {},
 		});
 		expect(w.listenerCount()).toBe(1);
@@ -221,7 +221,7 @@ describe('B. FrameCryptor.onDecryptStarved', () => {
 		const seen: Array<{ peerIndex?: number; framesDropped: number; sinceMs: number }> = [];
 		const w = makeObservableWorker();
 		const c = new FrameCryptor({
-			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0,
+			worker: w as unknown as Worker, role: 'receiver', peerId: 'p1', peerIndex: 0, allowTransitOnly: true,
 			onDecryptStarved: (info) => seen.push(info),
 		});
 		w.dispatch({ type: 'decrypt_starved', peerIndex: 2, framesDropped: 5, sinceMs: 1200 });

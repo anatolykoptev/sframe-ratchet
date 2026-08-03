@@ -35,6 +35,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		wipeTimers: new Map(),
 		preEpochQueue: [],
 		draining: false,
+		pendingDrain: false,
 		emit,
 		codec: undefined,
 		sifTrailer: undefined,
