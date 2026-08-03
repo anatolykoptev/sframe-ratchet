@@ -74,6 +74,18 @@ export interface SimpleKexConfig {
    * All parties in a room MUST agree on the same suite.
    */
   suite?: CipherSuite;
+
+  /**
+   * Explicit acknowledgement that SimpleKex is insecure for production use
+   * (issue #51). When `false` (default), the constructor logs a one-time
+   * console.warn reminding the caller that SimpleKex has no forward secrecy,
+   * no membership consensus, and no revocation. Set to `true` to suppress the
+   * warning — the caller acknowledges these limitations.
+   *
+   * Note: strict-FIPS mode (`enableStrictFips`) ALWAYS forbids SimpleKex
+   * regardless of this flag.
+   */
+  acknowledgeInsecure?: boolean;
 }
 
 /**
@@ -118,6 +130,15 @@ export class SimpleKex {
     assertNotSimpleKex();
     if (!config.sharedSecret) {
       throw new TypeError('SimpleKex: sharedSecret must be a non-empty string');
+    }
+    // Issue #51: one-time warning unless the caller explicitly acknowledges
+    // the insecurity of SimpleKex.
+    if (!config.acknowledgeInsecure) {
+      console.warn(
+        '[sframe-ratchet] SimpleKex is NOT for production: no forward secrecy, ' +
+        'no membership consensus, no revocation. Set `acknowledgeInsecure: true` ' +
+        'in SimpleKexConfig to suppress this warning (issue #51).',
+      );
     }
     this._secret = config.sharedSecret;
     this._salt = config.salt ?? DEFAULT_SALT;

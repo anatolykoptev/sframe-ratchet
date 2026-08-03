@@ -6,12 +6,18 @@
 //
 // Window size 0 disables protection (debug/tests only).
 
+import { ctBigintEqual } from './constant-time.ts';
+
 /**
  * Sliding replay window — tracks a bounded set of recently seen bigint CTR
  * values. `check()` returns false if the CTR has been seen (replay).
  * `accept()` records a CTR. `clear()` resets all state.
  *
  * NOT thread-safe; synchronous (no async state).
+ *
+ * CTR comparisons use {@link ctBigintEqual} (issue #49: defense-in-depth
+ * constant-time comparison, though CTR values are not secret in the SFrame
+ * threat model).
  */
 export class SlidingReplayWindow {
 	/** Ordered record of CTR values (insertion order = eviction order). */
@@ -34,7 +40,14 @@ export class SlidingReplayWindow {
 	 */
 	check(ctr: bigint): boolean {
 		if (this.windowSize === 0) return true;
-		return !this.seen.has(ctr);
+		// Issue #49: use constant-time comparison instead of Set.has for the
+		// replay check. Set.has is hash-based and not constant-time, though
+		// CTR values are not secret in the SFrame threat model — this is
+		// defense-in-depth.
+		for (const seen of this.seen) {
+			if (ctBigintEqual(seen, ctr)) return false;
+		}
+		return true;
 	}
 
 	/**
@@ -44,7 +57,12 @@ export class SlidingReplayWindow {
 	 */
 	accept(ctr: bigint): void {
 		if (this.windowSize === 0) return;
-		if (this.seen.has(ctr)) return;
+		// Issue #49: constant-time duplicate check before insert.
+		let alreadySeen = false;
+		for (const seen of this.seen) {
+			if (ctBigintEqual(seen, ctr)) { alreadySeen = true; break; }
+		}
+		if (alreadySeen) return;
 		// Evict oldest if at capacity
 		if (this.queue.length >= this.windowSize) {
 			const oldest = this.queue.shift();

@@ -155,6 +155,14 @@ export interface DurableReplayGuardOptions {
 	window?: number;
 	/** Suppress the one-time no-IDB / no-WebLocks warning. */
 	warnIfUnavailable?: boolean;
+	/**
+	 * Throw at construction when IndexedDB or Web Locks is unavailable, instead
+	 * of silently degrading to in-memory-only protection (issue #43). Default
+	 * `false` — the guard logs a warning and continues with `available=false`.
+	 * Set to `true` for production deployments where cross-reload replay
+	 * protection is a hard requirement.
+	 */
+	requireAvailable?: boolean;
 }
 
 /**
@@ -213,6 +221,16 @@ export class DurableReplayGuard {
 		const hasIdb = idbAvailable();
 		const hasLocks = locksAvailable();
 		this.available = hasIdb && hasLocks;
+		// Issue #43: throw when explicitly required and unavailable, instead of
+		// silently degrading to in-memory-only protection.
+		if (!this.available && opts.requireAvailable) {
+			const missing = !hasIdb ? 'IndexedDB' : 'Web Locks API';
+			throw new Error(
+				`DurableReplayGuard: ${missing} is unavailable — durable cross-reload replay ` +
+				'protection cannot be constructed. Set `requireAvailable: false` to allow ' +
+				'silent degradation to in-memory-only protection (CWE-294 risk).',
+			);
+		}
 		if (opts.warnIfUnavailable !== false) {
 			if (!hasIdb) {
 				console.warn(

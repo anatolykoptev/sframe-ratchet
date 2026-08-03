@@ -43,3 +43,29 @@ export function ctEndsWith(frame: Uint8Array, trailer: Uint8Array): boolean {
 	const suffix = frame.subarray(frame.length - trailer.length);
 	return ctEqual(suffix, trailer);
 }
+
+/**
+ * Constant-time bigint equality — converts both values to 64-bit LE byte
+ * arrays and compares via {@link ctEqual}. Used for CTR comparisons in replay
+ * windows (issue #49: `Set<bigint>.has()` uses a hash-based lookup that is
+ * not constant-time, though the CTR values themselves are not secret in the
+ * SFrame threat model — this is defense-in-depth).
+ *
+ * Returns `true` iff `a === b`.
+ */
+export function ctBigintEqual(a: bigint, b: bigint): boolean {
+	const aBytes = bigintToBytes64(a);
+	const bBytes = bigintToBytes64(b);
+	return ctEqual(aBytes, bBytes);
+}
+
+/** Convert a bigint to a fixed 8-byte little-endian array (zero-padded). */
+function bigintToBytes64(v: bigint): Uint8Array {
+	const out = new Uint8Array(8);
+	let x = v;
+	for (let i = 0; i < 8; i++) {
+		out[i] = Number(x & 0xffn);
+		x >>= 8n;
+	}
+	return out;
+}

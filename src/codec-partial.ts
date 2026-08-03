@@ -13,7 +13,7 @@
 // SECURITY NOTE: the unencrypted prefix bytes are NOT included in AES-GCM
 // additional-authenticated-data. An attacker who can modify these bytes can
 // corrupt the codec header without detection. This is the documented
-// trade-off for SFU compatibility. See docs/SECURITY.md.
+// trade-off for SFU compatibility (issue #50). See docs/SECURITY.md.
 
 import type { Codec, FrameKind } from './worker-types.ts';
 

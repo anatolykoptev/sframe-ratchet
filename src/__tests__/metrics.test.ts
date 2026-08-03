@@ -29,6 +29,8 @@ import type { MetricsEvent, OutMsg } from '../worker-types.ts';
 import type { PeerIndex } from '../types.ts';
 import { PRE_EPOCH_QUEUE_CAP } from '../worker-types.ts';
 import { makeBundles } from './helpers.ts';
+import { emitMetric } from '../metrics.ts';
+import { onMetrics } from '../index.ts';
 
 function makeEncryptedFrame(body: Uint8Array): RTCEncodedVideoFrame {
 	const buf = new ArrayBuffer(body.byteLength);
@@ -333,5 +335,35 @@ describe('metrics — set-metrics-enabled control message', () => {
 
 		const afterOff = metricsOf(emitted).length;
 		expect(afterOff).toBe(afterOn); // no new events
+	});
+});
+
+describe('emitMetric error-swallowing (issue #54)', () => {
+	it('swallows emit errors without throwing', () => {
+		const emit = () => { throw new Error('postMessage failed'); };
+		const state = createWorkerState(emit);
+		state.metricsEnabled = true;
+		// Must not throw despite emit throwing
+		expect(() => emitMetric(state, { kind: 'encrypt', epoch: 0, peerIndex: 0, bytes: 100 })).not.toThrow();
+	});
+});
+
+describe('onMetrics error-swallowing (issue #54)', () => {
+	it('a throwing handler does not break the listener', () => {
+		const listeners: ((ev: MessageEvent) => void)[] = [];
+		const worker = {
+			addEventListener: (_t: 'message', l: (ev: MessageEvent) => void) => { listeners.push(l); },
+			removeEventListener: (_t: 'message', l: (ev: MessageEvent) => void) => {
+				const i = listeners.indexOf(l); if (i >= 0) listeners.splice(i, 1);
+			},
+		} as unknown as { addEventListener: (t: 'message', l: (ev: MessageEvent) => void) => void; removeEventListener: (t: 'message', l: (ev: MessageEvent) => void) => void };
+
+		const off = onMetrics(worker, () => { throw new Error('handler boom'); });
+		expect(listeners).toHaveLength(1);
+		// Must not throw despite the handler error
+		const event: MetricsEvent = { kind: 'encrypt', epoch: 0, peerIndex: 0, bytes: 1 };
+		expect(() => listeners[0]!({ data: { type: 'metrics', event } } as MessageEvent)).not.toThrow();
+		off();
+		expect(listeners).toHaveLength(0);
 	});
 });

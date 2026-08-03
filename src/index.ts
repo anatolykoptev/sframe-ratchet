@@ -94,6 +94,10 @@ export {
 } from './ratchet-crypto.js';
 
 // ---- Ratchet crypto primitives -------------------------------------------
+// Issue #56: these low-level primitives are exported for advanced users who
+// need to build custom key-exchange layers. They are NOT part of the stable
+// public API and may change between minor versions. The stable API is
+// `createChatProvider`, `FrameCryptor`, `RoomRatchet`, and `SimpleKex`.
 export {
 	deriveSenderKeys,
 	deriveEpochKeyTable,

@@ -20,6 +20,20 @@ import { textEncoder } from './internal/buffer.ts';
  * |-------------------------|-------------|----------|----------|------------|-----|
  * | AES_128_GCM_SHA256_128  | AES-128-GCM | 16 bytes | SHA-256  | 32 bytes   | 16  |
  * | AES_256_GCM_SHA512_128  | AES-256-GCM | 32 bytes | SHA-512  | 64 bytes   | 16  |
+ *
+ * @security **Cipher suite downgrade (issue #46):** this library does NOT
+ * provide built-in cipher-suite negotiation or downgrade protection. All
+ * members of a room MUST agree on the suite out-of-band (via the signaling
+ * layer). A malicious signaling server could silently downgrade a peer to
+ * `AES_128_GCM_SHA256` by withholding the stronger suite. Production
+ * deployments MUST negotiate the suite over an authenticated signaling
+ * channel and include the agreed suite in the epoch transcript (see issue
+ * #45 on transcript binding).
+ *
+ * @security **Default suite (issue #52):** the default is `AES_128_GCM_SHA256`
+ * (RFC 9605 suite 4) for interoperability with reference implementations.
+ * For applications requiring 256-bit security, explicitly set
+ * `suite: 'AES_256_GCM_SHA512'` on all peers.
  */
 export type CipherSuite = 'AES_128_GCM_SHA256' | 'AES_256_GCM_SHA512';
 
@@ -105,7 +119,18 @@ export async function x25519Dh(
 			// Some browsers ship X25519 under a slightly different shape; @noble below is always correct.
 		}
 	}
-	return x25519.getSharedSecret(privateKey, peerPublicKey);
+	// Issue #53: if @noble/curves is not installed (peerDependency optional
+	// in some package managers), the import at the top of this file will have
+	// thrown at module-load time. This try/catch provides a clearer error.
+	try {
+		return x25519.getSharedSecret(privateKey, peerPublicKey);
+	} catch (e) {
+		throw new Error(
+			'x25519Dh: WebCrypto X25519 unavailable and @noble/curves fallback ' +
+			'failed. Ensure @noble/curves is installed (npm install @noble/curves). ' +
+			`Original error: ${e instanceof Error ? e.message : String(e)}`,
+		);
+	}
 }
 
 // --- AES-GCM key import helper --------------------------------------------
@@ -192,6 +217,15 @@ export async function unwrapChainKey(
  *   Salt    = HKDF-Expand(ChainKey, "sframe/v1/salt" || peer_index_be16, 12)
  * HKDF hash and AEAD key size are determined by the cipher suite.
  * ChainKey must be suite.chainKeyBytes long.
+ *
+ * @security **Transcript binding (issue #45):** the key derivation binds only
+ * `(ChainKey, peer_index)` — it does NOT bind the epoch transcript (membership
+ * changes, cipher suite, room ID). A malicious signaling server can perform
+ * a KCI/UKS attack by replaying the same ChainKey to a different room or
+ * membership set. Production deployments MUST bind the transcript out-of-band
+ * (e.g. by mixing the room ID + membership list + suite into the HKDF `info`
+ * at the signaling layer, or by using MLS which provides transcript binding
+ * natively).
  */
 export async function deriveSenderKeys(
 	chainKey: Uint8Array,

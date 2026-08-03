@@ -37,14 +37,33 @@ describe('MonotonicIdbCtrAllocator', () => {
 		expect(() => new MonotonicIdbCtrAllocator(undefined as unknown as string)).toThrow();
 	});
 
+	it('throws when navigator.locks unavailable and allowSingleTab not set (issue #47)', () => {
+		// Simulate a legacy browser without navigator.locks.
+		// Node 20 has no navigator at all; Node 24 has it.
+		const origNavigator = (globalThis as Record<string, unknown>).navigator;
+		try {
+			// Remove navigator entirely to simulate legacy env
+			delete (globalThis as Record<string, unknown>).navigator;
+			expect(() => new MonotonicIdbCtrAllocator('test-keyspace-nolocks')).toThrow('navigator.locks is unavailable');
+		} finally {
+			if (origNavigator !== undefined) {
+				(globalThis as Record<string, unknown>).navigator = origNavigator;
+			}
+		}
+	});
+
+	it('does not throw when allowSingleTab: true (issue #47)', () => {
+		expect(() => new MonotonicIdbCtrAllocator('test-keyspace-allow', { allowSingleTab: true })).not.toThrow();
+	});
+
 	it('starts at 0 for fresh (room, uid) pair', async () => {
-		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-fresh');
+		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-fresh', { allowSingleTab: true });
 		const ctr = await alloc.next('room-new', 'user-new');
 		expect(ctr).toBe(0n);
 	});
 
 	it('increments monotonically', async () => {
-		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-mono');
+		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-mono', { allowSingleTab: true });
 		const v0 = await alloc.next('room-mono', 'user-a');
 		const v1 = await alloc.next('room-mono', 'user-a');
 		const v2 = await alloc.next('room-mono', 'user-a');
@@ -53,7 +72,7 @@ describe('MonotonicIdbCtrAllocator', () => {
 	});
 
 	it('different (room, uid) pairs have independent counters', async () => {
-		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-iso');
+		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-iso', { allowSingleTab: true });
 		const a0 = await alloc.next('room-iso', 'user-x');
 		const b0 = await alloc.next('room-iso', 'user-y');
 		// Both start from 0 independently
@@ -64,8 +83,8 @@ describe('MonotonicIdbCtrAllocator', () => {
 	});
 
 	it('works in Node env without navigator.locks (fallback path)', async () => {
-		// In vitest/Node, navigator is undefined → single-tab fallback
-		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-nolock');
+		// In vitest/Node, navigator is undefined → single-tab fallback via allowSingleTab
+		const alloc = new MonotonicIdbCtrAllocator('test-keyspace-nolock', { allowSingleTab: true });
 		// Should not throw even without navigator.locks
 		const v = await alloc.next('room-nolock', 'user-nolock');
 		expect(typeof v).toBe('bigint');
