@@ -6,6 +6,7 @@ export default defineConfig({
     worker: 'src/worker.ts',
     'kex-simple': 'src/kex-simple.ts',
     'chat/index': 'src/chat/index.ts',
+    'chat/mls': 'src/chat/mls.ts',
     'mls/index': 'src/mls/index.ts',
   },
   format: ['esm'],

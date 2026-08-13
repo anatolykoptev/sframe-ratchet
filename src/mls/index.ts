@@ -127,6 +127,94 @@ export function defaultCredentialToPeerId(leaf: LeafNode): string {
 	return bytesToBase64(leaf.signaturePublicKey);
 }
 
+// ---- Standalone epoch material derivation ---------------------------------
+
+/**
+ * Epoch material extracted from a ts-mls ClientState — the common output
+ * needed by both FrameCryptor.setEpoch (media path) and MlsChatProvider.setEpoch
+ * (chat path). Extracted so the chat path does NOT need a mock FrameCryptor
+ * to capture the ChainKey.
+ */
+export interface MlsEpochMaterial {
+	/** MLS epoch number. */
+	epoch: number;
+	/** peerId → peerIndex map (lex-sorted, §7.8-valid). */
+	peerIndexMap: Record<string, PeerIndex>;
+	/** MLS ChainKey (suite.chainKeyBytes long). CALLER must zeroize after use. */
+	chainKey: Uint8Array;
+	/** 32-byte epoch authenticator for out-of-band verification. */
+	epochAuthenticator: Uint8Array;
+}
+
+/**
+ * Derive epoch material (ChainKey + peerIndexMap + authenticator) from a
+ * ts-mls ClientState. This is the shared core of `createMlsRatchetProvider.applyEpoch`
+ * — extracted so the chat path (`createMlsChatProvider`) can consume it without
+ * a FrameCryptor.
+ *
+ * The caller is responsible for zeroizing the ChainKey after delivering it to
+ * the consumer (FrameCryptor.setEpoch or MlsChatProvider.setEpoch — both
+ * zeroize internally, but defense-in-depth: the caller should too if it keeps
+ * a reference).
+ *
+ * @param state       ts-mls ClientState (after epoch advance).
+ * @param cs          CiphersuiteImpl matching the MLS group's cipher suite.
+ * @param suite       SFrame cipher suite — determines chainKeyBytes.
+ * @param groupId     MLS group ID — bound into the exporter context.
+ * @param maxEpoch    Maximum epoch (KID bit width guard). Default 0xFFFF.
+ * @param credentialToPeerId  Maps MLS LeafNode → peerId string.
+ * @returns Epoch material (epoch, peerIndexMap, chainKey, epochAuthenticator).
+ */
+export async function deriveMlsEpochMaterial(
+	state: ClientState,
+	cs: CiphersuiteImpl,
+	suite: CipherSuite,
+	groupId: Uint8Array,
+	maxEpoch: number = 0xFFFF,
+	credentialToPeerId: (leaf: LeafNode) => string = defaultCredentialToPeerId,
+): Promise<MlsEpochMaterial> {
+	// 1. Guard epoch overflow (KID bit width).
+	const epoch = Number(state.groupContext.epoch);
+	if (epoch > maxEpoch) {
+		throw new RangeError(
+			`deriveMlsEpochMaterial: MLS epoch ${epoch} exceeds maxEpoch ${maxEpoch} ` +
+			`(KID format bit width). Use a larger nEpochBits or rotate the room.`,
+		);
+	}
+
+	// 2. Extract member peerIds from MLS group.
+	const members = getGroupMembers(state);
+	if (members.length === 0) {
+		throw new Error('deriveMlsEpochMaterial: MLS group has no members');
+	}
+	const peerIds = members.map(credentialToPeerId);
+
+	// 3. Build gap-free peerIndexMap (lex-sorted, §7.8-valid).
+	const peerIndexMap = buildPeerIndexMap(peerIds);
+	validatePeerIndexMap(peerIndexMap);
+
+	// 4. Derive ChainKey via MLS exporter (RFC 9420 §8.5).
+	const context = new Uint8Array(groupId.length + 1);
+	context.set(groupId, 0);
+	context[groupId.length] = suiteByte(suite);
+
+	const { chainKeyBytes } = suiteParams(suite);
+	const chainKey = await mlsExporter(
+		state.keySchedule.exporterSecret,
+		MLS_EXPORTER_LABEL,
+		context,
+		chainKeyBytes,
+		cs,
+	);
+
+	return {
+		epoch,
+		peerIndexMap,
+		chainKey,
+		epochAuthenticator: state.keySchedule.epochAuthenticator,
+	};
+}
+
 // ---- Factory --------------------------------------------------------------
 
 /**
@@ -170,58 +258,30 @@ export function createMlsRatchetProvider(opts: MlsRatchetProviderOptions): MlsRa
 		async applyEpoch(state: ClientState, cs: CiphersuiteImpl): Promise<void> {
 			if (disposed) throw new Error('MlsRatchetProvider: disposed');
 
-			// 1. Guard epoch overflow (KID bit width).
-			const epoch = Number(state.groupContext.epoch);
-			if (epoch > maxEpoch) {
-				throw new RangeError(
-					`MlsRatchetProvider: MLS epoch ${epoch} exceeds maxEpoch ${maxEpoch} ` +
-					`(KID format bit width). Use a larger nEpochBits or rotate the room.`,
-				);
-			}
-
-			// 2. Extract member peerIds from MLS group.
-			const members = getGroupMembers(state);
-			if (members.length === 0) {
-				throw new Error('MlsRatchetProvider: MLS group has no members');
-			}
-			const peerIds = members.map(credentialToPeerId);
-
-			// 3. Build gap-free peerIndexMap (lex-sorted, §7.8-valid).
-			//    Reuses buildPeerIndexMap from ratchet-ids.ts — same function
-			//    the ECIES path uses. No leaf-index compaction needed.
-			const peerIndexMap = buildPeerIndexMap(peerIds);
-			validatePeerIndexMap(peerIndexMap);
-
-			// 4. Derive ChainKey via MLS exporter (RFC 9420 §8.5).
-			//    Context = groupId || suiteByte for cross-group/cross-suite separation.
-			//    The label is domain-separated by deriveSecret ('MLS 1.0 ' prefix).
-			const context = new Uint8Array(groupId.length + 1);
-			context.set(groupId, 0);
-			context[groupId.length] = suiteByte(suite);
-
-			const chainKey = await mlsExporter(
-				state.keySchedule.exporterSecret,
-				MLS_EXPORTER_LABEL,
-				context,
-				chainKeyBytes,
-				cs,
+			// Delegate to the shared derivation, then deliver to FrameCryptor.
+			const material = await deriveMlsEpochMaterial(
+				state, cs, suite, groupId, maxEpoch, credentialToPeerId,
 			);
 
 			// 5. Deliver to FrameCryptor (calls deriveEpochKeyTable internally).
 			//    This is the SAME seam RoomRatchet.installEpoch uses — no new interface.
-			await frameCryptor.setEpoch({ epoch, peerIndexMap, chainKey });
+			await frameCryptor.setEpoch({
+				epoch: material.epoch,
+				peerIndexMap: material.peerIndexMap,
+				chainKey: material.chainKey,
+			});
 
 			// 6. Surface epoch authenticator for out-of-band verification.
 			if (onEpochAuthenticator) {
-				onEpochAuthenticator(state.keySchedule.epochAuthenticator);
+				onEpochAuthenticator(material.epochAuthenticator);
 			}
 			if (onEpochApplied) {
-				onEpochApplied(epoch, peerIndexMap);
+				onEpochApplied(material.epoch, material.peerIndexMap);
 			}
 
 			// 7. Zeroize the raw ChainKey (we extracted it; ts-mls still owns
 			//    the exporterSecret in its KeySchedule).
-			zeroOutUint8Array(chainKey);
+			zeroOutUint8Array(material.chainKey);
 		},
 
 		getEpochAuthenticator(state: ClientState): Uint8Array {
