@@ -14,7 +14,7 @@
 
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
-import { createCommit, type ClientState, type CiphersuiteImpl } from 'ts-mls';
+import { createCommit, defaultProposalTypes, unsafeTestingAuthenticationService, type ClientState, type CiphersuiteImpl } from 'ts-mls';
 import {
 	deriveMlsEpochMaterial,
 } from '../../mls/index.ts';
@@ -138,14 +138,14 @@ describe('MlsChatProvider', () => {
 
 		// Advance to epoch 2 by adding Carol to the SAME group.
 		const carol = await makeMember('carol', cs);
-		const commit2 = await createCommit(
-			{ state: aliceEpoch1State, cipherSuite: cs },
-			{
-				extraProposals: [{ proposalType: 'add', add: { keyPackage: carol.publicPackage } }],
-				ratchetTreeExtension: true,
-				wireAsPublicMessage: true,
-			},
-		);
+		const ctx = { cipherSuite: cs, authService: unsafeTestingAuthenticationService };
+		const commit2 = await createCommit({
+			context: ctx,
+			state: aliceEpoch1State,
+			extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: carol.publicPackage } }],
+			ratchetTreeExtension: true,
+			wireAsPublicMessage: true,
+		});
 		const aliceState2 = commit2.newState;
 		expect(Number(aliceState2.groupContext.epoch)).toBe(2);
 
@@ -272,7 +272,7 @@ describe('MlsChatProvider', () => {
 		const bobEpochRaw = await deriveChainKey(bobState, cs, groupId);
 
 		// Remap peerIndexMap: base64(identity) → identity string
-		const { base64ToBytes } = await import('ts-mls/util/byteArray.js');
+		const { base64ToBytes } = await import('ts-mls');
 		const remap = (epoch: typeof aliceEpochRaw) => ({
 			...epoch,
 			peerIndexMap: Object.fromEntries(
