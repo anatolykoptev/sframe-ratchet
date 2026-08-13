@@ -31,13 +31,15 @@
 // SFrame AEAD layer (this module).
 
 import { sframeEncrypt, sframeDecrypt, parseHeader } from '../sframe.ts';
-import { SFrameError, StaleEpochError, KeyNotFoundError } from '../errors.ts';
+import { StaleEpochError, KeyNotFoundError } from '../errors.ts';
+import { ReplayError } from './index.ts';
 import { deriveSenderKeys, suiteParams, type CipherSuite } from '../ratchet-crypto.ts';
 import { FIXED_KID_CODEC, type KidCodec } from '../kid-format.ts';
-import { SlidingReplayWindow } from './replay.ts';
-import { DurableReplayGuard } from './durable-replay.ts';
-import { RandomCtrAllocator, MonotonicIdbCtrAllocator, type CtrAllocator } from './ctr-allocator.ts';
-import { getOrCreateNested } from '../internal/collections.ts';
+import {
+	createReplayCtrState,
+	getReplayWindow as getRw,
+	durableKey as dk,
+} from './shared.ts';
 import { zeroize } from '../internal/buffer.ts';
 import type { PeerIndex, SFrameKey } from '../types.ts';
 
@@ -133,29 +135,6 @@ export interface MlsChatProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Error class (re-exported from chat/index for API parity)
-// ---------------------------------------------------------------------------
-
-/**
- * Thrown when unseal detects a replayed CTR value.
- * Extends SFrameError for uniform error handling.
- */
-export class MlsReplayError extends SFrameError {
-	readonly code = 'REPLAY' as const;
-
-	constructor(
-		message: string,
-		public override readonly context?: {
-			roomId?: string;
-			senderUid?: string;
-			ctr?: bigint;
-		},
-	) {
-		super(message, context);
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Per-room epoch state
 // ---------------------------------------------------------------------------
 
@@ -189,65 +168,14 @@ interface RoomEpochState {
  */
 export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsChatProvider {
 	const suite = opts.suite ?? 'AES_128_GCM_SHA256';
-	const replayWindow = opts.replayWindow ?? 1024;
-	const ctrStrategy = opts.ctrStrategy ?? 'random-64';
 	const uidToPeerId = opts.uidToPeerId ?? ((uid: string) => uid);
 
-	if (ctrStrategy === 'monotonic-idb' && !opts.ctrKeyspace) {
-		throw new Error('createMlsChatProvider: ctrKeyspace is required when ctrStrategy is monotonic-idb');
-	}
-
-	// Durable replay — same logic as createChatProvider.
-	if (opts.durableReplay === true && !opts.durableReplayNamespace) {
-		throw new Error('createMlsChatProvider: durableReplayNamespace is required when durableReplay is true');
-	}
-	const durableReplayEnabled = opts.durableReplay !== false && !!opts.durableReplayNamespace;
-	const durableReplayWindow = opts.durableReplayWindow ?? replayWindow;
-	if (durableReplayEnabled && durableReplayWindow > replayWindow) {
-		throw new Error(
-			`createMlsChatProvider: durableReplayWindow (${durableReplayWindow}) must be <= replayWindow (${replayWindow})`,
-		);
-	}
-
-	const allocator: CtrAllocator =
-		ctrStrategy === 'monotonic-idb'
-			? new MonotonicIdbCtrAllocator(opts.ctrKeyspace!, { allowSingleTab: true })
-			: new RandomCtrAllocator();
+	// Shared CTR allocator + replay window + durable guard construction.
+	const { allocator, replayWindow, durable, replayWindows } =
+		createReplayCtrState(opts, 'createMlsChatProvider');
 
 	// Per-room epoch state.
 	const roomEpochs = new Map<string, RoomEpochState>();
-
-	// Per-(roomId, senderUid) replay windows (same structure as createChatProvider).
-	const replayWindows = new Map<string, Map<string, SlidingReplayWindow>>();
-	const MAX_REPLAY_ROOMS = 1024;
-	function evictOldReplayRooms(): void {
-		while (replayWindows.size > MAX_REPLAY_ROOMS) {
-			const oldest = replayWindows.keys().next().value;
-			if (oldest === undefined) break;
-			replayWindows.delete(oldest);
-		}
-	}
-
-	const durable = durableReplayEnabled
-		? new DurableReplayGuard({
-				namespace: opts.durableReplayNamespace!,
-				window: durableReplayWindow,
-			})
-		: null;
-
-	function getReplayWindow(roomId: string, senderUid: string): SlidingReplayWindow {
-		const isNew = !replayWindows.has(roomId);
-		const w = getOrCreateNested(
-			replayWindows, roomId, senderUid,
-			() => new SlidingReplayWindow(replayWindow),
-		);
-		if (isNew) evictOldReplayRooms();
-		return w;
-	}
-
-	function durableKey(roomId: string, senderUid: string): string {
-		return `${roomId}|${senderUid}`;
-	}
 
 	// KID codec — fixed format (epoch << 16 | peerIndex), same as chat mode.
 	const kidCodec: KidCodec = FIXED_KID_CODEC;
@@ -277,8 +205,8 @@ export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsCha
 		);
 
 		// Zeroize the ChainKey — we've derived all per-sender keys from it.
-		// The caller's copy is not touched (they pass a Uint8Array we don't own
-		// after this call, but zeroizing our reference is defense-in-depth).
+		// This mutates the caller's Uint8Array in place; the caller should not
+		// retain a reference after calling setEpoch.
 		zeroize(chainKey);
 
 		roomEpochs.set(roomId, { epoch, keys, indexToPeerId });
@@ -290,7 +218,7 @@ export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsCha
 			replayWindows.delete(roomId);
 			if (durable?.available) {
 				for (const senderUid of senders.keys()) {
-					void durable.clear(durableKey(roomId, senderUid));
+					void durable.clear(dk(roomId, senderUid));
 				}
 			}
 		}
@@ -357,16 +285,16 @@ export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsCha
 		// The replay window is keyed by senderUid from the context, NOT by
 		// peerIndex from the KID — this binds the replay window to the
 		// authenticated sender identity, not the wire-encoded index.
-		const rw = getReplayWindow(roomId, senderUid);
+		const rw = getRw(replayWindows, roomId, senderUid, replayWindow);
 		if (!rw.check(ctr)) {
-			throw new MlsReplayError(
+			throw new ReplayError(
 				`createMlsChatProvider: replay detected (ctr=${ctr}, room=${roomId}, uid=${senderUid})`,
 				{ roomId, senderUid, ctr },
 			);
 		}
 		if (durable?.available) {
-			if (!(await durable.check(durableKey(roomId, senderUid), ctr))) {
-				throw new MlsReplayError(
+			if (!(await durable.check(dk(roomId, senderUid), ctr))) {
+				throw new ReplayError(
 					`createMlsChatProvider: durable cross-reload replay detected (ctr=${ctr}, room=${roomId}, uid=${senderUid})`,
 					{ roomId, senderUid, ctr },
 				);
@@ -378,7 +306,7 @@ export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsCha
 		// Record CTR only after successful AEAD.
 		rw.accept(ctr);
 		if (durable?.available) {
-			await durable.accept(durableKey(roomId, senderUid), ctr);
+			await durable.accept(dk(roomId, senderUid), ctr);
 		}
 		return plaintext;
 	}
@@ -389,7 +317,7 @@ export function createMlsChatProvider(opts: MlsChatProviderOptions = {}): MlsCha
 		replayWindows.delete(roomId);
 		if (durable?.available && senders) {
 			for (const senderUid of senders.keys()) {
-				void durable.clear(durableKey(roomId, senderUid));
+				void durable.clear(dk(roomId, senderUid));
 			}
 		}
 		opts.onEpochCleared?.(roomId);

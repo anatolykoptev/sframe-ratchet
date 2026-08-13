@@ -14,15 +14,7 @@
 
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
-import {
-	createGroup,
-	joinGroup,
-	createCommit,
-	generateKeyPackage,
-	emptyPskIndex,
-	type ClientState,
-	type CiphersuiteImpl,
-} from 'ts-mls';
+import { createCommit, type ClientState, type CiphersuiteImpl } from 'ts-mls';
 import {
 	deriveMlsEpochMaterial,
 } from '../../mls/index.ts';
@@ -30,61 +22,13 @@ import {
 	createMlsChatProvider,
 } from '../mls.ts';
 import { StaleEpochError } from '../../errors.ts';
+import {
+	getCiphersuiteImpl,
+	makeMember,
+	createTwoMemberGroup,
+} from '../../__tests__/mls-helpers.ts';
 
 // ---- Test helpers ---------------------------------------------------------
-
-const CS_NAME = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const;
-
-async function getCiphersuiteImpl(): Promise<CiphersuiteImpl> {
-	const { nobleCryptoProvider, getCiphersuiteFromName } = await import('ts-mls');
-	return nobleCryptoProvider.getCiphersuiteImpl(getCiphersuiteFromName(CS_NAME));
-}
-
-function makeBasicCredential(identity: string): { credentialType: 'basic'; identity: Uint8Array } {
-	return { credentialType: 'basic', identity: new TextEncoder().encode(identity) };
-}
-
-async function makeMember(
-	identity: string,
-	cs: CiphersuiteImpl,
-): Promise<{ publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage }> {
-	const { defaultCapabilities, defaultLifetime } = await import('ts-mls');
-	return generateKeyPackage(
-		makeBasicCredential(identity),
-		defaultCapabilities(),
-		defaultLifetime,
-		[],
-		cs,
-	);
-}
-
-/** Create a 2-member MLS group: Alice creates, adds Bob via commit. */
-async function createTwoMemberGroup(
-	cs: CiphersuiteImpl,
-	alice: { publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage },
-	bob: { publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage },
-): Promise<{ aliceState: ClientState; bobState: ClientState; groupId: Uint8Array }> {
-	const groupId = new TextEncoder().encode('test-group');
-	let aliceState = await createGroup(groupId, alice.publicPackage, alice.privatePackage, [], cs);
-	const commitResult = await createCommit(
-		{ state: aliceState, cipherSuite: cs },
-		{
-			extraProposals: [{ proposalType: 'add', add: { keyPackage: bob.publicPackage } }],
-			ratchetTreeExtension: true,
-			wireAsPublicMessage: true,
-		},
-	);
-	aliceState = commitResult.newState;
-	if (!commitResult.welcome) throw new Error('createCommit did not produce a welcome');
-	const bobState = await joinGroup(
-		commitResult.welcome,
-		bob.publicPackage,
-		bob.privatePackage,
-		emptyPskIndex,
-		cs,
-	);
-	return { aliceState, bobState, groupId };
-}
 
 /** Derive epoch material from a ClientState using deriveMlsEpochMaterial. */
 async function deriveChainKey(
