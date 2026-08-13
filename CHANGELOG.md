@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.5...v0.5.6) (2026-08-13)
+
+
+### Added
+
+* **chat/mls:** add createMlsChatProvider — MLS-backed chat E2EE (no Worker) ([#62](https://github.com/anatolykoptev/sframe-ratchet/issues/62)) ([17b4ca8](https://github.com/anatolykoptev/sframe-ratchet/commit/17b4ca895e8d7673bb02706bd9ba02ac9c8af2e3))
+
 ## [0.5.5](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.4...v0.5.5) (2026-08-03)
 
 
