@@ -49,6 +49,10 @@
       "import": "./dist/chat/index.js",
       "types": "./dist/chat/index.d.ts"
     },
+    "./chat/mls": {
+      "import": "./dist/chat/mls.js",
+      "types": "./dist/chat/mls.d.ts"
+    },
     "./mls": {
       "import": "./dist/mls/index.js",
       "types": "./dist/mls/index.d.ts"
