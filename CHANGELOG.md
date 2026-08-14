@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — Phase 1: receive-side wire-format tolerance
+
+* **sframe:** three AAD forms supported on decrypt (`header`, `prefix`, `canonical`) via the new `AadForm` type and `aadForm` parameter on `sframeEncrypt` / `sframeDecrypt` / `sframeEncryptInto`. The `canonical` form (`be16(prefix.length) || prefix || header`) is the phase-2 target — it resolves the ambiguity of the intermediate `prefix || header` form with a self-describing length prefix.
+* **worker-frame:** receive-side format probe + cache. On the first frame from a sender, the receiver probes all `(prefixLen, aadForm)` candidates at step 0 and caches the resolved format per `(epoch, peerIndex)`. Subsequent frames use exactly 1 AEAD attempt. For VP9/AV1 the receiver tolerates both `N=0` (old/phase-1 sender) and `N=1` (new/phase-2 sender). The cache is cleared on epoch wipe so a rotation never inherits a stale format guess.
+* **worker-frame:** encode-side `encrypt_failure` coalescing (at most one per `STARVE_COALESCE_MS`), mirroring the decode-side `decrypt_starved` pattern.
+* **worker-frame:** `encode_drop` metric `code` now distinguishes `NO_EPOCH` from other encode failures.
+* **docs/SECURITY.md:** prefix-authentication section rewritten for the staged rollout (phase 1 live, phase 2 future).
+
+### Changed — Phase 1: sender unchanged, VP9/AV1 reverted to N=0
+
+* **codec-partial:** VP9/AV1 `getUnencryptedBytes` reverted to `N=0` (full encryption). The SFU cannot see VP9/AV1 keyframes in phase 1 — this is the pre-`b6ded9d` behaviour. Phase 2 will set `N=1`.
+* **worker-frame:** `encodeFrame` passes `aadForm='header'` (AAD = header only, no prefix). The sender's wire format is byte-for-byte identical to the pre-`b6ded9d` code.
+* **codec-partial:** VP9 bit-position comment corrected (frame_type bit position depends on profile: bit 2 for profile 0/1, bit 1 for profile 2/3). str0m citations removed (derived from spec, not from str0m source).
+
+### Note — Phase 2 will be a breaking change
+
+Phase 2 will switch the sender to the canonical AAD form and VP9/AV1 `N=1`. This is a wire-format change that will require a **major version bump** (breaking change). Phase 1 receivers already accept the canonical form, so deployed phase 1 receivers will interop with phase 2 senders without upgrade.
+
 ## [0.5.7](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.6...v0.5.7) (2026-08-14)
 
 

@@ -9,6 +9,7 @@ import type { CipherSuite } from './ratchet-crypto.ts';
 import type { SlidingReplayWindow } from './internal/replay.ts';
 import type { DurableReplayGuard } from './chat/durable-replay.ts';
 import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
+import type { AadForm } from './sframe.ts';
 
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
@@ -180,6 +181,25 @@ export interface EpochEntry {
 	ratchetSteps: Map<PeerIndex, number>;
 }
 
+/**
+ * Resolved wire-format guess for a (epoch, peerIndex) sender. Cached after the
+ * first successful decrypt so subsequent frames use exactly 1 AEAD attempt
+ * instead of re-deriving the format every frame.
+ *
+ * - `prefixLen`: number of cleartext prefix bytes the sender leaves in the
+ *   clear. For VP8/H264/Opus this is fixed by the codec; for VP9/AV1 it can
+ *   be 0 (old/phase-1 sender) or 1 (new/phase-2 sender).
+ * - `aadForm`: how the sender constructs AAD from the prefix and header.
+ *   See `AadForm` in sframe.ts for the three forms.
+ *
+ * The cache is keyed by (epoch, peerIndex) and cleared on epoch wipe
+ * (wipeEpoch) so a rotation never inherits a stale format guess.
+ */
+export interface FormatGuess {
+	prefixLen: number;
+	aadForm: AadForm;
+}
+
 export interface WorkerState {
 	role: Role | null;
 	peerId: string | null;
@@ -301,6 +321,26 @@ export interface WorkerState {
 	 * after the loop settles (success or exhaustion).
 	 */
 	ratchetPromises: Map<string, Promise<Uint8Array>>;
+	/**
+	 * Per-(epoch, peerIndex) wire-format cache for receive-side tolerance
+	 * (phase 1). Outer key = epoch, inner key = peerIndex. After the first
+	 * successful decrypt from a sender, the resolved (prefixLen, aadForm) is
+	 * cached so subsequent frames use exactly 1 AEAD attempt instead of
+	 * re-deriving the format every frame. Cleared on epoch wipe (wipeEpoch)
+	 * so a rotation never inherits a stale format guess.
+	 */
+	formatCache: Map<number, Map<number, FormatGuess>>;
+	/**
+	 * Encode-side starvation coalescing (LOW finding). Mirrors the decode-side
+	 * `starve*` fields: `encrypt_failure` OutMsg is emitted on the first drop
+	 * of an episode, then at most once per `STARVE_COALESCE_MS`. Reset by a
+	 * successful encode. Prevents 30/s `encrypt_failure` spam under a
+	 * persistent encode-side fault.
+	 */
+	encryptStarveActive: boolean;
+	encryptStarveSinceMs: number;
+	encryptStarveFramesDropped: number;
+	encryptStarveLastEmitMs: number;
 	/**
 	 * Durable cross-reload replay guard for media frames (CWE-294). Opt-in —
 	 * default null. When present, persists accepted CTRs to IndexedDB so the

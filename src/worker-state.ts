@@ -53,6 +53,11 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		failureCounts: new Map(),
 		failureTolerance: -1,
 		ratchetPromises: new Map(),
+		formatCache: new Map(),
+		encryptStarveActive: false,
+		encryptStarveSinceMs: 0,
+		encryptStarveFramesDropped: 0,
+		encryptStarveLastEmitMs: 0,
 		durableReplay: null,
 	};
 }
@@ -278,6 +283,10 @@ export function wipeEpoch(state: WorkerState, epoch: number): void {
 	// at this epoch will be rejected by the stale-epoch gate before the replay
 	// check runs. Drop them to free memory (RFC 9605 §9.3, issue #10).
 	state.replayWindows.delete(epoch);
+	// Format cache for the wiped epoch is stale — a new epoch's sender may use
+	// a different wire format. Drop it so the first frame in the new epoch
+	// re-resolves the format (phase 1 receive-side tolerance).
+	state.formatCache.delete(epoch);
 	// Clear durable replay state for all peers in the wiped epoch
 	// (architecture-council nit #2: matching clear on epoch rotation so
 	// stale CTRs from the wiped epoch do not false-reject fresh frames under
@@ -297,6 +306,7 @@ export function teardown(state: WorkerState): void {
 	state.wipeTimers.clear();
 	state.epochs.clear();
 	state.replayWindows.clear();
+	state.formatCache.clear();
 	state.preEpochQueue.length = 0; // discard queued pre-epoch frames on teardown
 	state.ctr = 0n;
 	state.currentEpoch = -1;
@@ -304,6 +314,10 @@ export function teardown(state: WorkerState): void {
 	state.selfPeerIndex = null;
 	state.failureCounts.clear();
 	state.ratchetPromises.clear();
+	state.encryptStarveActive = false;
+	state.encryptStarveSinceMs = 0;
+	state.encryptStarveFramesDropped = 0;
+	state.encryptStarveLastEmitMs = 0;
 	// Drop the durable replay guard reference. The IDB store is NOT cleared
 	// here — teardown is a worker lifecycle event, not a key rotation. The
 	// store persists across worker restarts by design (that is the point of

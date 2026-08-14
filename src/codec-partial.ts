@@ -10,18 +10,16 @@
 // FrameCryptor) to know how many bytes to peel from the front before
 // handing the rest to the SFrame decode path.
 //
-// SECURITY NOTE: the unencrypted prefix bytes ARE included in AES-GCM
-// additional-authenticated-data (AAD), alongside the SFrame header. An
-// attacker who modifies the prefix bytes will cause an AEAD authentication
-// failure — the frame is rejected, not silently corrupted. This closes the
-// previously-documented trade-off (issue #50 / oxpulse-partner-edge#618)
-// where the prefix was unauthenticated and an on-path attacker could rewrite
-// codec metadata undetected. The fix applies to ALL codecs: VP8, H.264,
-// VP9, AV1, and Opus.
-//
-// The prefix is still UNENCRYPTED (visible to the SFU) but now AUTHENTICATED
-// (tamper-evident). This is the same property the SFrame header already has:
-// visible but integrity-protected.
+// PHASE 1 SECURITY NOTE: the unencrypted prefix bytes are NOT included in
+// AES-GCM additional-authenticated-data in phase 1. The sender emits the
+// original format (AAD = header only). An attacker who can modify wire bytes
+// can corrupt the codec header without detection by the AEAD layer. This is
+// the documented trade-off for SFU compatibility (issue #50), inherited from
+// the pre-fix behaviour. Phase 2 will switch the sender to the canonical AAD
+// form (be16(prefix.length) || prefix || header), making the prefix
+// tamper-evident. Phase 1 receivers already ACCEPT the canonical form so the
+// phase 2 switch does not break interop. See docs/SECURITY.md for the full
+// staged-rollout plan.
 
 import type { Codec, FrameKind } from './worker-types.ts';
 
@@ -34,8 +32,7 @@ import type { Codec, FrameKind } from './worker-types.ts';
  * (the SFU cannot see the keyframe); one byte long is a gratuitous
  * plaintext leak.
  *
- * Per-codec justification (derived from the spec AND from str0m's
- * depacketizer/packetizer source, not from memory):
+ * Per-codec justification:
  *
  * - VP8 (RFC 6386 §9.1): The first 3 bytes are the frame tag
  *   `frame_tag = key_frame(1b) | version(3b) | show_frame(1b) | first_part_size(19b)`.
@@ -43,25 +40,30 @@ import type { Codec, FrameKind } from './worker-types.ts';
  *   the start code (0x9d 0x01 0x2a) and width/height — leaving these in the
  *   clear lets the SFU extract resolution for SVC routing and lets decoders
  *   fail gracefully on key mismatch (garbage instead of fatal parse error).
- *   N=10 (key) / 3 (inter). str0m's `detect_vp8_keyframe` reads byte 0.
+ *   N=10 (key) / 3 (inter).
  *
  * - H.264 (RFC 7798): Byte 0 is the FUA/NALU header. The NAL type (bits 4-0
  *   for single-NAL, or the inner byte for FUA) identifies an IDR slice
- *   (type 5 = keyframe). N=1. str0m's `detect_h264_keyframe` reads byte 0.
+ *   (type 5 = keyframe). N=1.
  *
  * - VP9 (draft-ietf-payload-vp9-16 / VP9 bitstream spec §9.1): Byte 0 is the
  *   uncompressed frame header start:
  *     `frame_marker(2b) | profile_low(1b) | profile_high(1b) | show_existing(1b) | frame_type(1b) | ...`
- *   - frame_marker must be 0b10 (bits 7-6)
- *   - frame_type: 0 = KEY_FRAME, 1 = NON_KEY_FRAME (bit 2 for profile 0/1,
- *     bit 1 for profile 2/3)
+ *   - frame_marker must be 0b10 (bits 7-6, MSB-first)
+ *   - frame_type: 0 = KEY_FRAME, 1 = NON_KEY_FRAME. The bit position depends
+ *     on profile: bit 2 for profile 0 (profile_low=0, profile_high=0,
+ *     show_existing=0), bit 1 for profile 2/3 (profile_low=0, profile_high=1).
+ *     Profile 1 (profile_low=1) uses bit 2 as well because the profile_high
+ *     bit is 0.
  *   - show_existing_frame = 1 references a previously decoded frame, not a
  *     real keyframe
  *   An observer of byte 0 learns: the frame marker (confirms VP9), the
  *   profile, whether it's a show_existing_frame, and the frame type
- *   (keyframe vs inter). str0m's `detect_vp9_keyframe_bitstream` reads
- *   ONLY byte 0 — confirmed at str0m/src/packet/vp9.rs:133-157.
- *   N=1.
+ *   (keyframe vs inter).
+ *
+ *   PHASE 1: N=0 (full encryption). The SFU cannot see VP9 keyframes in
+ *   phase 1 — this is the pre-fix behaviour. Phase 2 will set N=1 so byte 0
+ *   (frame marker + frame type) is visible to the SFU.
  *
  * - AV1 (AV1 RTP spec v1.0.0 / AV1 spec §6.2): Byte 0 is the first OBU
  *   (Open Bitstream Unit) header:
@@ -71,12 +73,10 @@ import type { Codec, FrameKind } from './worker-types.ts';
  *   first OBU is a SequenceHeader. An observer of byte 0 learns: the OBU
  *   type (SequenceHeader = keyframe vs Frame/FrameHeader = inter), whether
  *   there's an extension byte, and whether there's a size field.
- *   str0m's AV1 packetizer `parse_obus` reads byte 0 to extract the OBU
- *   type (str0m/src/packet/av1.rs:603), and `aggregation_header` sets the
- *   N bit based on `obus[0].obu_type() == SequenceHeader` (av1.rs:235).
- *   str0m's `detect_av1_keyframe` reads the N bit from the RTP aggregation
- *   header (av1.rs:21-24), which is set from byte 0 of the raw frame.
- *   N=1.
+ *
+ *   PHASE 1: N=0 (full encryption). The SFU cannot see AV1 keyframes in
+ *   phase 1 — this is the pre-fix behaviour. Phase 2 will set N=1 so byte 0
+ *   (OBU header with obu_type) is visible to the SFU.
  *
  * - Opus (RFC 6716 §3.1): Byte 0 is the TOC (Table of Contents) byte
  *   `config(5b) | s(1b) | c(2b)`. Leaving it unencrypted lets the SFU
@@ -94,13 +94,14 @@ export function getUnencryptedBytes(codec: Codec | undefined, frameKind: FrameKi
 		case 'opus':
 			return 1;
 		case 'vp9':
-			// Byte 0: frame_marker(2b) | profile(2b) | show_existing(1b) | frame_type(1b) | ...
-			// str0m detect_vp9_keyframe_bitstream reads ONLY byte 0.
-			return 1;
+			// PHASE 1: N=0 (full encryption). Phase 2 will set N=1 so byte 0
+			// (frame_marker + frame_type) is visible to the SFU.
+			return 0;
 		case 'av1':
-			// Byte 0: OBU header — obu_type(4b) identifies SequenceHeader (keyframe).
-			// str0m parse_obus reads byte 0 for OBU type; aggregation_header sets N bit from it.
-			return 1;
+			// PHASE 1: N=0 (full encryption). Phase 2 will set N=1 so byte 0
+			// (OBU header with obu_type = SequenceHeader for keyframes) is
+			// visible to the SFU.
+			return 0;
 		default:
 			// undefined / unknown — full encryption, preserving current behaviour.
 			return 0;
