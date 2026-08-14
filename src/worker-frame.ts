@@ -60,24 +60,31 @@ export function pipe(
 				// M3.3 race gotcha #1: a sender-side frame may arrive at the
 				// transform BEFORE the first epoch propagates over DC id:1.
 				// `encodeFrame` throws "worker: no active send epoch" in that
-				// window. Surface a breadcrumb so the smoke test can grep for
-				// it; the frame is dropped (not queued) — by the time the
+				// window. The frame is dropped (not queued) — by the time the
 				// epoch lands the encoder has already moved on, and a delayed
-				// frame would carry a stale CTR. M3.4 may add a small
-				// pre-epoch buffer; for now the keyframe-request loop will
-				// recover the receiver's video within ~1s.
+				// frame would carry a stale CTR.
 				const msg = err instanceof Error ? err.message : String(err);
-				if (side === 'encode' && msg === 'worker: no active send epoch') {
-					console.warn('[gc:e2e] frame before epoch — dropped');
+				const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
+
+				if (side === 'encode') {
+					// Encode-side: do NOT rethrow. A rethrow rejects pipeTo, and a
+					// rejected pipeTo does not recover — the sender's media stops
+					// for the rest of the call (oxpulse-partner-edge#618). Drop the
+					// frame, count it, and let the next frame flow. The decode side
+					// already drops without rethrowing; this removes the asymmetry.
+					const reason = msg === 'worker: no active send epoch' ? 'no_epoch' : 'encode_failed';
+					console.warn(`[gc:e2e] encode drop (${reason}): ${msg}`);
+					emitMetric(state, { kind: 'encode_drop', code: errCode });
+					state.emit({ type: 'encrypt_failure', reason, detail: msg });
+				} else {
+					// Decode-side: decodeFrame already called state.emit(decrypt_failure)
+					// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
+					// so developers can see individual frame drops without prod noise.
+					if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
+						console.warn('[sframe] decode drop', { reason: msg });
+					}
 				}
-				// Decode-side: decodeFrame already called state.emit(decrypt_failure)
-				// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
-				// so developers can see individual frame drops without prod noise.
-				if (side === 'decode' && (globalThis as Record<string, unknown>).__e2e_debug === true) {
-					console.warn('[sframe] decode drop', { reason: msg });
-				}
-				// Drop frames that fail to decrypt; sender-side errors are fatal.
-				if (side === 'encode') throw err;
+				// Frame is dropped — not enqueued. The pipe survives.
 			}
 		},
 	});
@@ -107,9 +114,10 @@ export async function encodeFrame(
 	// Codec-aware partial encryption: N leading bytes stay in the clear so the
 	// SFU can route by frame type and decoders fail gracefully on key mismatch.
 	// When codec is unset (undefined), N=0 — identical to the current full-encrypt
-	// path. NOTE: the unencrypted prefix is NOT in AES-GCM AAD; see SECURITY.md.
+	// path. The unencrypted prefix IS included in AES-GCM AAD (prefix || header)
+	// so an attacker cannot rewrite codec metadata undetected.
 	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), plaintext.byteLength);
-	const prefix = plaintext.subarray(0, N);  // untouched
+	const prefix = plaintext.subarray(0, N);  // untouched, but authenticated via AAD
 	const body = plaintext.subarray(N);       // encrypted
 
 	// Hot path: build wire buffer in one allocation.
@@ -121,9 +129,10 @@ export async function encodeFrame(
 	const trailerLen = trailer ? trailer.byteLength : 0;
 	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag] [SIF trailer (optional)]
 	// The SIF trailer is appended OUTSIDE the AEAD — it is a routing hint, not a security boundary.
+	// The prefix is INSIDE the AEAD AAD (prefix || header) — tamper-evident.
 	const wire = new Uint8Array(N + header.length + body.byteLength + AEAD_TAG_BYTES + trailerLen);
 	if (N > 0) wire.set(prefix, 0);
-	const written = await sframeEncryptInto(wire, N, header, body, key, ctr);
+	const written = await sframeEncryptInto(wire, N, header, body, key, ctr, N > 0 ? prefix : undefined);
 	if (trailer) wire.set(trailer, N + written);
 	// wire is a freshly allocated exclusive ArrayBuffer — .buffer is safe to assign
 	// directly without the toExclusiveArrayBuffer copy.
@@ -177,6 +186,7 @@ async function tryDecryptWithRatchet(
 	buf: Uint8Array,
 	epoch: number,
 	peerIndex: PeerIndex,
+	aadPrefix?: Uint8Array,
 ): Promise<Uint8Array> {
 	const entry = state.epochs.get(epoch);
 	if (!entry) {
@@ -193,7 +203,7 @@ async function tryDecryptWithRatchet(
 		return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 			const ep = state.epochs.get(e);
 			return ep?.keys.get(pi) ?? null;
-		}, { kidCodec: state.kidCodec });
+		}, { kidCodec: state.kidCodec, aadPrefix });
 	} catch (err) {
 		firstError = err;
 	}
@@ -220,7 +230,7 @@ async function tryDecryptWithRatchet(
 				return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				}, { kidCodec: state.kidCodec });
+				}, { kidCodec: state.kidCodec, aadPrefix });
 			} catch {
 				// Step 0 still fails — our frame is at a different step than
 				// the one the first caller found. Fall through to our own
@@ -268,7 +278,7 @@ async function tryDecryptWithRatchet(
 					if (e === epoch && pi === peerIndex) return next;
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				}, { kidCodec: state.kidCodec });
+				}, { kidCodec: state.kidCodec, aadPrefix });
 				// Success at step N: advance the cached key so subsequent frames at
 				// this step hit immediately without re-deriving.
 				entry.keys.set(peerIndex, next);
@@ -331,7 +341,7 @@ export async function decodeFrame(
 	const frameKind: FrameKind | undefined =
 		rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
 	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), payload.byteLength);
-	const prefix = payload.subarray(0, N);   // unencrypted prefix (not authenticated)
+	const prefix = payload.subarray(0, N);   // unencrypted prefix (authenticated via AAD)
 	const buf = payload.subarray(N);         // [SFrame header][ciphertext+tag]
 
 	let hdrKid = -1;
@@ -431,7 +441,7 @@ export async function decodeFrame(
 			);
 		}
 
-		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex, N > 0 ? prefix : undefined);
 		// Record the CTR as seen ONLY after a successful AEAD decrypt.
 		replayWindow.accept(hdr.ctr);
 		// Durable accept — persist the CTR so the replay defense survives a
@@ -498,8 +508,20 @@ export async function decodeFrame(
 }
 
 /**
- * Push a frame into the pre-epoch queue, enforcing the FIFO ring cap.
- * Overflow drops the oldest entry and emits decrypt_failure{reason:'queue_overflow'}.
+ * Push a frame into the pre-epoch queue, enforcing the bounded cap.
+ * Overflow drops the NEWEST entry (tail) and emits
+ * decrypt_failure{reason:'queue_overflow'}.
+ *
+ * Eviction policy: TAIL eviction (drop the newest), NOT head eviction.
+ * The head of a video stream is the keyframe — the one frame that must
+ * survive. Every later frame in the queue is undecodable without it.
+ * Dropping from the head (the previous behaviour, oxpulse-partner-edge#618)
+ * evicted the keyframe first, making every subsequent frame useless.
+ * Tail eviction preserves the oldest frames (including the keyframe) and
+ * sacrifices the newest, which is the least damaging choice: the newest
+ * frame can be re-requested via PLI/FIR, but a lost keyframe stalls the
+ * entire stream until the next periodic keyframe.
+ *
  * Used by both enqueuePreEpoch (initial enqueue) and drainPreEpochQueue
  * (re-enqueue on still-missing key) so cap is enforced on all paths.
  */
@@ -509,8 +531,8 @@ function pushToQueue(
 	peerIndex?: PeerIndex,
 ): void {
 	if (state.preEpochQueue.length >= state.preEpochQueueCap) {
-		// Drop oldest (FIFO ring — shift the front).
-		state.preEpochQueue.shift();
+		// Drop newest (tail) to preserve the keyframe at the head.
+		state.preEpochQueue.pop();
 		state.emit({ type: 'decrypt_failure', reason: 'queue_overflow' });
 		emitMetric(state, { kind: 'queue_drop', reason: 'pre_epoch_full' });
 		// Promote the drop to a first-class, coalesced recovery signal.
@@ -662,7 +684,7 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				}
 				// Use the ratchet retry helper so that within-epoch key advances are
 				// also handled for queued frames, consistent with the live decode path.
-				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex, N > 0 ? prefix : undefined);
 				// Record the CTR as seen ONLY after a successful AEAD decrypt.
 				replayWindow.accept(hdr.ctr);
 				// Durable accept — persist the CTR so the replay defense survives a

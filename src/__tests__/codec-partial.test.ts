@@ -63,10 +63,10 @@ describe('getUnencryptedBytes', () => {
 		{ codec: 'h264',    frameKind: 'key',   expected: 1  },
 		{ codec: 'h264',    frameKind: 'inter', expected: 1  },
 		{ codec: 'h264',    frameKind: undefined, expected: 1 },
-		{ codec: 'vp9',     frameKind: 'key',   expected: 0  },
-		{ codec: 'vp9',     frameKind: 'inter', expected: 0  },
-		{ codec: 'av1',     frameKind: 'key',   expected: 0  },
-		{ codec: 'av1',     frameKind: 'inter', expected: 0  },
+		{ codec: 'vp9',     frameKind: 'key',   expected: 1  },
+		{ codec: 'vp9',     frameKind: 'inter', expected: 1  },
+		{ codec: 'av1',     frameKind: 'key',   expected: 1  },
+		{ codec: 'av1',     frameKind: 'inter', expected: 1  },
 		{ codec: 'opus',    frameKind: undefined, expected: 1 },
 		{ codec: undefined, frameKind: undefined, expected: 0 },
 		{ codec: undefined, frameKind: 'key',   expected: 0  },
@@ -181,14 +181,16 @@ describe('AEAD failure on ciphertext flip', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Flipping a byte in the unencrypted prefix does NOT cause AEAD failure
+// 5. Flipping a byte in the unencrypted prefix DOES cause AEAD failure
+//    (prefix is now authenticated via AAD — oxpulse-partner-edge#618)
 // ---------------------------------------------------------------------------
 
-describe('no AEAD failure on prefix flip', () => {
-	it('flip a byte in the unencrypted prefix → decode does NOT throw (AEAD unaffected)', async () => {
-		// NOTE: this is the documented trade-off — prefix is not authenticated.
-		// A corrupt prefix may produce garbage decoded frame content, but it
-		// does NOT trigger an AES-GCM authentication failure.
+describe('AEAD failure on prefix flip (prefix is authenticated)', () => {
+	it('flip a byte in the unencrypted prefix → decode REJECTS (AEAD auth failure)', async () => {
+		// The unencrypted prefix is now included in AES-GCM AAD (prefix || header).
+		// A flip in the prefix changes the AAD on the decrypt side, causing the
+		// AEAD tag to not verify. This closes the previously-documented trade-off
+		// where the prefix was unauthenticated.
 		const codec: Codec = 'vp8';
 		const frameType = 'key'; // N = 10
 		const PLAINTEXT = new Uint8Array(64);
@@ -202,13 +204,8 @@ describe('no AEAD failure on prefix flip', () => {
 		wire[5] ^= 0xff; // flip byte 5 (inside the 10-byte vp8 keyframe prefix)
 
 		const decFrame = makeVideoFrame(wire, frameType);
-		// Should NOT throw — AEAD covers only the post-prefix body.
-		await expect(decodeFrame(decState, decFrame)).resolves.toBeUndefined();
-
-		// Decrypted content has the flipped prefix but correct encrypted region.
-		const result = new Uint8Array(decFrame.data);
-		expect(result[5]).toBe(PLAINTEXT[5] ^ 0xff); // prefix byte is flipped
-		expect(result[10]).toBe(PLAINTEXT[10]);        // encrypted region is intact
+		// Should THROW — AEAD now covers the prefix via AAD.
+		await expect(decodeFrame(decState, decFrame)).rejects.toBeDefined();
 	});
 });
 
@@ -248,7 +245,7 @@ describe('default path (codec=undefined) unchanged', () => {
 		expect(new Uint8Array(decFrame.data)).toEqual(PLAINTEXT);
 	});
 
-	it('vp9 and av1 also produce N=0 — indistinguishable from no-codec path', async () => {
+	it('vp9 and av1 produce N=1 — prefix byte in the clear, rest encrypted, round-trips', async () => {
 		for (const codec of ['vp9', 'av1'] as Codec[]) {
 			const { enc: encState, dec: decState } = await makeStatePair(codec);
 
@@ -256,9 +253,10 @@ describe('default path (codec=undefined) unchanged', () => {
 			const encFrame = makeVideoFrame(PLAINTEXT, 'key');
 			await encodeFrame(encState, encFrame, 'key');
 
-			// Wire starts with SFrame header (no prefix).
+			// Wire starts with 1 prefix byte, then SFrame header.
 			const wire = new Uint8Array(encFrame.data);
-			expect(() => parseHeader(wire)).not.toThrow();
+			expect(wire[0]).toBe(PLAINTEXT[0]); // prefix byte in the clear
+			expect(() => parseHeader(wire.subarray(1))).not.toThrow();
 
 			const decFrame = makeVideoFrame(wire, 'key');
 			await decodeFrame(decState, decFrame);

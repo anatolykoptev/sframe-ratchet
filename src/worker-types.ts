@@ -125,7 +125,8 @@ export type MetricsEvent =
 	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch' | 'replay'; epoch?: number }
 	| { kind: 'replay_drop'; epoch: number; peerIndex: number; ctr: string }
 	| { kind: 'key_invalidated'; epoch: number; peerIndex: number; failures: number }
-	| { kind: 'epoch_advance'; from: number; to: number };
+	| { kind: 'epoch_advance'; from: number; to: number }
+	| { kind: 'encode_drop'; code: string; epoch?: number; peerIndex?: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
@@ -133,6 +134,14 @@ export type OutMsg =
 	| { type: 'metrics'; event: MetricsEvent }
 	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch' | 'replay' | 'key_invalid';
 		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string }
+	/**
+	 * Sender-side frame encode failed and the frame was dropped. The encode
+	 * pipe is NOT torn down — subsequent frames continue to flow. Emitted on
+	 * every encode-side drop so the host app can count them (oxpulse-partner-edge#618).
+	 * `reason` is 'encode_failed' for a frame-level encryption error, or
+	 * 'no_epoch' when no active send epoch is installed.
+	 */
+	| { type: 'encrypt_failure'; reason: 'encode_failed' | 'no_epoch'; detail?: string }
 	/**
 	 * Receiver installed/activated a new epoch (currentEpoch advanced). First-class
 	 * control signal — always emitted, independent of `metricsEnabled`. The main

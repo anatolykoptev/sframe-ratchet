@@ -2,7 +2,8 @@
 // Spec: when decodeFrame fails because epoch is missing (no entry in state.epochs),
 // the frame is queued in a bounded ring buffer (cap 50/peer) instead of dropped.
 // When setEpoch drains the queue, frames are retried in FIFO order.
-// Overflow (>50) drops oldest and bumps client.frame_decode_queue_overflow counter.
+// Overflow (>50) drops newest (tail eviction — preserves the keyframe at head)
+// and bumps client.frame_decode_queue_overflow counter.
 //
 // These tests drive decodeFrame + drainQueue directly (no DOM / no real Worker).
 // RED before implementation.
@@ -95,7 +96,12 @@ describe('pre-epoch frame queue', () => {
 		expect(decoded).toEqual(['frame-0', 'frame-1', 'frame-2']);
 	});
 
-	it('overflow: 60 frames queued → 50 kept (oldest dropped), counter bumped', async () => {
+	it('overflow: 60 frames queued → 50 kept (newest dropped, oldest preserved), counter bumped', async () => {
+		// Tail eviction: when the queue is full, the NEWEST frame is dropped
+		// (pop from tail), preserving the OLDEST frames at the head — including
+		// the keyframe, which is typically the first frame in a video stream.
+		// This is the fix for oxpulse-partner-edge#618: head eviction evicted
+		// the keyframe first, making every subsequent frame undecodable.
 		const emitted: OutMsg[] = [];
 		const state = createWorkerState((m) => emitted.push(m));
 
@@ -112,22 +118,31 @@ describe('pre-epoch frame queue', () => {
 			await decodeFrame(state, frame);
 		}
 
-		// 10 frames were dropped (oldest 0-9), counter emitted once per drop.
+		// 10 frames were dropped (newest at each overflow step), counter emitted once per drop.
+		// Tail eviction: when pushing frame N onto a full queue, pop the current tail
+		// (frame N-1) then push frame N. After pushing 60 frames into a 50-cap queue,
+		// the surviving frames are 0-48 (the 49 oldest) and 59 (the last pushed).
+		// Frames 49-58 were evicted one-by-one as each new frame arrived.
 		const overflowEvents = emitted.filter(
 			(m) => m.type === 'decrypt_failure' && (m as { type: string; reason: string }).reason === 'queue_overflow',
 		);
 		expect(overflowEvents).toHaveLength(10);
 
-		// After drain, frames 10-59 (the 50 kept) should be decryptable.
+		// After drain, the 50 kept frames should be decryptable.
 		const bundles = await makeBundles(chainKey, 0, peerIndexMap);
 		installEpoch(state, 0, 0, bundles);
 		await drainPreEpochQueue(state);
 
-		// Frames 10-59 now have decrypted data; frames 0-9 were dropped (data unchanged = ciphertext).
-		// We verify that frame 10 (first kept) decoded correctly.
-		const frame10 = frames[10];
-		expect(new TextDecoder().decode(new Uint8Array(frame10.data))).toBe('f10');
+		// Frame 0 (first kept — the keyframe, head of stream) decoded correctly.
+		// This is the critical assertion: head eviction would have dropped frame 0.
+		const frame0 = frames[0];
+		expect(new TextDecoder().decode(new Uint8Array(frame0.data))).toBe('f0');
 
+		// Frame 48 (last of the original 49 oldest) decoded correctly.
+		const frame48 = frames[48];
+		expect(new TextDecoder().decode(new Uint8Array(frame48.data))).toBe('f48');
+
+		// Frame 59 (the newest — survived because it was the last push) decoded.
 		const frame59 = frames[59];
 		expect(new TextDecoder().decode(new Uint8Array(frame59.data))).toBe('f59');
 	});

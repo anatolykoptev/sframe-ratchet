@@ -231,11 +231,14 @@ describe('encodeFrame fast path', () => {
 		expect(wire.subarray(0, 10)).toEqual(plaintext.subarray(0, 10));
 
 		// Manually decrypt: strip the VP8 prefix, then decrypt the sframe portion.
+		// The prefix is now in AAD (prefix || header), so pass it as aadPrefix.
 		const VP8_KEY_N = 10;
+		const prefixBytes = wire.subarray(0, VP8_KEY_N);
 		const sframeBytes = wire.subarray(VP8_KEY_N);
 		const decryptedBody = await sframeDecrypt(
 			sframeBytes,
 			({ kid }) => (kid === selfKey.kid ? selfKey : null),
+			{ aadPrefix: prefixBytes },
 		);
 		// The decrypted body is plaintext[10..30].
 		expect(decryptedBody).toEqual(plaintext.subarray(VP8_KEY_N));
