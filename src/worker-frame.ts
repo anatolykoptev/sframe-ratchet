@@ -6,13 +6,19 @@
 // M3.5: pre-epoch ring buffer. When decodeFrame can't find a key (epoch not
 // yet installed), the frame is queued in state.preEpochQueue (cap
 // PRE_EPOCH_QUEUE_CAP). drainPreEpochQueue() is called by worker-state.ts
-// after installEpoch to retry decryption. Overflow drops the oldest entry
-// and emits decrypt_failure{reason:'queue_overflow'}.
+// after installEpoch to retry decryption. Overflow drops the newest entry
+// (tail eviction) and emits decrypt_failure{reason:'queue_overflow'}.
+//
+// Phase 1 receive-side tolerance: the decoder accepts three AAD forms
+// ('header', 'prefix', 'canonical') and two prefix lengths for VP9/AV1
+// (N=0 old, N=1 new). The resolved format is cached per (epoch, peerIndex)
+// so the common case is 1 AEAD attempt per frame. See sframe.ts for the
+// AAD form definitions and docs/SECURITY.md for the staged-rollout plan.
 
 import { parseHeader, serializeHeader } from './sframe-header.ts';
-import { sframeDecrypt, sframeEncrypt, sframeEncryptInto } from './sframe.ts';
+import { sframeDecrypt, sframeEncrypt, sframeEncryptInto, type AadForm } from './sframe.ts';
 import { deriveNextSenderKey } from './ratchet-crypto.ts';
-import { STARVE_COALESCE_MS, type FrameKind, type Side, type WorkerState } from './worker-types.ts';
+import { STARVE_COALESCE_MS, type FrameKind, type Side, type WorkerState, type FormatGuess, type Codec } from './worker-types.ts';
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
@@ -33,6 +39,161 @@ function getReplayWindow(state: WorkerState, epoch: number, peerIndex: number): 
 		state.replayWindows, epoch, peerIndex,
 		() => new SlidingReplayWindow(state.replayWindowSize),
 	);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: receive-side format tolerance helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Ordered list of (prefixLen, aadForm) candidates to try when the format is
+ * not yet cached for a sender. Ordered by likelihood in phase 1: the old
+ * format (AAD=header) is most common because the phase-1 sender emits it.
+ *
+ * For VP8/H264/Opus the prefix length is fixed by the codec — only the AAD
+ * form is ambiguous. For VP9/AV1 both the prefix length (0=old, 1=new) and
+ * the AAD form are ambiguous. For undefined codec, N=0 and only 'header'
+ * vs 'canonical' (be16(0)||header) differ.
+ *
+ * Worst-case candidate counts (cache miss, first frame only):
+ *   VP9/AV1:        4  (N=0 header, N=1 canonical, N=1 prefix, N=1 header)
+ *   VP8/H264/Opus:  3  (header, canonical, prefix)
+ *   undefined:      2  (header, canonical)
+ * After the first frame resolves the format, the cache ensures 1 attempt.
+ */
+function formatCandidates(codec: Codec | undefined, frameKind: FrameKind | undefined): Array<{ prefixLen: number; aadForm: AadForm }> {
+	if (codec === 'vp9' || codec === 'av1') {
+		return [
+			{ prefixLen: 0, aadForm: 'header' },     // old format (N=0, AAD=header)
+			{ prefixLen: 1, aadForm: 'canonical' },   // new canonical (N=1, AAD=be16||prefix||header)
+			{ prefixLen: 1, aadForm: 'prefix' },       // intermediate b6ded9d (N=1, AAD=prefix||header)
+			{ prefixLen: 1, aadForm: 'header' },        // robustness: N=1 with old AAD (no real sender)
+		];
+	}
+	const N = getUnencryptedBytes(codec, frameKind);
+	if (N === 0) {
+		return [
+			{ prefixLen: 0, aadForm: 'header' },     // old = new-non-canonical (empty prefix)
+			{ prefixLen: 0, aadForm: 'canonical' },   // new canonical (be16(0)||header)
+		];
+	}
+	return [
+		{ prefixLen: N, aadForm: 'header' },          // old format (prefix not in AAD)
+		{ prefixLen: N, aadForm: 'canonical' },        // new canonical
+		{ prefixLen: N, aadForm: 'prefix' },            // intermediate b6ded9d
+	];
+}
+
+/** Get the cached format guess for (epoch, peerIndex), or undefined. */
+function getFormatCache(state: WorkerState, epoch: number, peerIndex: number): FormatGuess | undefined {
+	return state.formatCache.get(epoch)?.get(peerIndex);
+}
+
+/** Cache a resolved format guess for (epoch, peerIndex). */
+function setFormatCache(state: WorkerState, epoch: number, peerIndex: number, guess: FormatGuess): void {
+	let inner = state.formatCache.get(epoch);
+	if (!inner) {
+		inner = new Map();
+		state.formatCache.set(epoch, inner);
+	}
+	inner.set(peerIndex, guess);
+}
+
+/** Invalidate the cached format for (epoch, peerIndex) — used when a cached
+ *  guess fails AEAD, so the next frame re-resolves from scratch. */
+function deleteFormatCache(state: WorkerState, epoch: number, peerIndex: number): void {
+	state.formatCache.get(epoch)?.delete(peerIndex);
+}
+
+/**
+ * Probe all format candidates at step 0 (cached key, no ratchet) and return
+ * the first that decrypts. This is the cache-miss path — it runs at most
+ * once per (epoch, peerIndex), after which the result is cached.
+ *
+ * Does NOT run the stale-epoch / replay / failure-invalidation gates — those
+ * run in the caller after the format is resolved. The probe only determines
+ * which wire format the sender used; it does not accept the frame.
+ *
+ * Returns the resolved format + plaintext + parsed header fields, or null
+ * if no candidate succeeded at step 0 (the key may have ratcheted past step
+ * 0, in which case the caller falls back to tryDecryptWithRatchet with the
+ * default format).
+ */
+async function probeFormat(
+	state: WorkerState,
+	payload: Uint8Array,
+	codec: Codec | undefined,
+	frameKind: FrameKind | undefined,
+): Promise<{
+	prefixLen: number; aadForm: AadForm; plaintext: Uint8Array;
+	epoch: number; peerIndex: PeerIndex; ctr: bigint;
+	prefix: Uint8Array; kid: number;
+} | null> {
+	const candidates = formatCandidates(codec, frameKind);
+	for (const { prefixLen, aadForm } of candidates) {
+		const buf = payload.subarray(prefixLen);
+		if (buf.length < 1) continue;
+		let hdr;
+		try { hdr = parseHeader(buf); } catch { continue; } // wrong prefixLen → garbage header
+		if (buf.length < hdr.bodyOffset + 16) continue; // too short for tag
+		const { epoch, peerIndex } = state.kidCodec.decode(hdr.kid);
+		const entry = state.epochs.get(epoch);
+		const key = entry?.keys.get(peerIndex);
+		if (!key) continue; // unknown epoch/peer for this prefixLen
+		const prefix = prefixLen > 0 ? payload.subarray(0, prefixLen) : undefined;
+		try {
+			const plaintext = await sframeDecrypt(
+				buf,
+				() => key,
+				{ kidCodec: state.kidCodec, aadPrefix: prefix, aadForm },
+			);
+			return {
+				prefixLen, aadForm, plaintext,
+				epoch, peerIndex, ctr: hdr.ctr, kid: hdr.kid,
+				prefix: prefixLen > 0 ? payload.subarray(0, prefixLen) : new Uint8Array(0),
+			};
+		} catch {
+			// AEAD failed or key mismatch — try next candidate
+		}
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Encode-side starvation coalescing (LOW finding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Note an encode-side frame drop and emit a COALESCED `encrypt_failure` signal.
+ * Emits immediately on the first drop of an episode, then at most once per
+ * `STARVE_COALESCE_MS`. Mirrors the decode-side `noteStarveDrop`. The
+ * `encode_drop` metric is still emitted per-drop (metrics are high-volume);
+ * only the OutMsg is coalesced to prevent 30/s spam under a persistent fault.
+ */
+function noteEncryptDrop(state: WorkerState, reason: 'encode_failed' | 'no_epoch', detail: string): void {
+	const now = state.now();
+	if (!state.encryptStarveActive) {
+		state.encryptStarveActive = true;
+		state.encryptStarveSinceMs = now;
+		state.encryptStarveFramesDropped = 1;
+		state.encryptStarveLastEmitMs = now;
+		state.emit({ type: 'encrypt_failure', reason, detail });
+		return;
+	}
+	state.encryptStarveFramesDropped += 1;
+	if (now - state.encryptStarveLastEmitMs >= STARVE_COALESCE_MS) {
+		state.encryptStarveLastEmitMs = now;
+		state.emit({ type: 'encrypt_failure', reason, detail });
+	}
+}
+
+/** End the encode-side starvation episode — a frame encoded successfully. */
+function clearEncryptStarve(state: WorkerState): void {
+	if (!state.encryptStarveActive) return;
+	state.encryptStarveActive = false;
+	state.encryptStarveSinceMs = 0;
+	state.encryptStarveFramesDropped = 0;
+	state.encryptStarveLastEmitMs = 0;
 }
 
 export function pipe(
@@ -60,24 +221,38 @@ export function pipe(
 				// M3.3 race gotcha #1: a sender-side frame may arrive at the
 				// transform BEFORE the first epoch propagates over DC id:1.
 				// `encodeFrame` throws "worker: no active send epoch" in that
-				// window. Surface a breadcrumb so the smoke test can grep for
-				// it; the frame is dropped (not queued) — by the time the
+				// window. The frame is dropped (not queued) — by the time the
 				// epoch lands the encoder has already moved on, and a delayed
-				// frame would carry a stale CTR. M3.4 may add a small
-				// pre-epoch buffer; for now the keyframe-request loop will
-				// recover the receiver's video within ~1s.
+				// frame would carry a stale CTR.
 				const msg = err instanceof Error ? err.message : String(err);
-				if (side === 'encode' && msg === 'worker: no active send epoch') {
-					console.warn('[gc:e2e] frame before epoch — dropped');
+				const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
+
+				if (side === 'encode') {
+					// Encode-side: do NOT rethrow. A rethrow rejects pipeTo, and a
+					// rejected pipeTo does not recover — the sender's media stops
+					// for the rest of the call (oxpulse-partner-edge#618). Drop the
+					// frame, count it, and let the next frame flow. The decode side
+					// already drops without rethrowing; this removes the asymmetry.
+					const reason = msg === 'worker: no active send epoch' ? 'no_epoch' : 'encode_failed';
+					// Distinguish the most common failure in the metric code: the
+					// 'no_epoch' error carries no `.code` property, so it would
+					// otherwise show as 'UNKNOWN'. The encrypt_failure OutMsg
+					// already distinguishes via `reason`; make the metric match.
+					const metricCode = reason === 'no_epoch' ? 'NO_EPOCH' : errCode;
+					console.warn(`[gc:e2e] encode drop (${reason}): ${msg}`);
+					emitMetric(state, { kind: 'encode_drop', code: metricCode });
+					// Coalesce encrypt_failure to at most once per STARVE_COALESCE_MS
+					// (LOW finding: 30/s spam under a persistent fault).
+					noteEncryptDrop(state, reason, msg);
+				} else {
+					// Decode-side: decodeFrame already called state.emit(decrypt_failure)
+					// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
+					// so developers can see individual frame drops without prod noise.
+					if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
+						console.warn('[sframe] decode drop', { reason: msg });
+					}
 				}
-				// Decode-side: decodeFrame already called state.emit(decrypt_failure)
-				// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
-				// so developers can see individual frame drops without prod noise.
-				if (side === 'decode' && (globalThis as Record<string, unknown>).__e2e_debug === true) {
-					console.warn('[sframe] decode drop', { reason: msg });
-				}
-				// Drop frames that fail to decrypt; sender-side errors are fatal.
-				if (side === 'encode') throw err;
+				// Frame is dropped — not enqueued. The pipe survives.
 			}
 		},
 	});
@@ -107,9 +282,12 @@ export async function encodeFrame(
 	// Codec-aware partial encryption: N leading bytes stay in the clear so the
 	// SFU can route by frame type and decoders fail gracefully on key mismatch.
 	// When codec is unset (undefined), N=0 — identical to the current full-encrypt
-	// path. NOTE: the unencrypted prefix is NOT in AES-GCM AAD; see SECURITY.md.
+	// path.
+	// PHASE 1: the unencrypted prefix is NOT included in AES-GCM AAD. The sender
+	// emits the original format (AAD = header only). Phase 2 will switch the
+	// sender to the canonical AAD form (be16(prefix.length) || prefix || header).
 	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), plaintext.byteLength);
-	const prefix = plaintext.subarray(0, N);  // untouched
+	const prefix = plaintext.subarray(0, N);  // untouched, NOT authenticated in phase 1
 	const body = plaintext.subarray(N);       // encrypted
 
 	// Hot path: build wire buffer in one allocation.
@@ -121,9 +299,12 @@ export async function encodeFrame(
 	const trailerLen = trailer ? trailer.byteLength : 0;
 	// Wire layout: [prefix (N bytes)] [SFrame header] [ciphertext + tag] [SIF trailer (optional)]
 	// The SIF trailer is appended OUTSIDE the AEAD — it is a routing hint, not a security boundary.
+	// The prefix is INSIDE the AEAD AAD (prefix || header) — tamper-evident.
 	const wire = new Uint8Array(N + header.length + body.byteLength + AEAD_TAG_BYTES + trailerLen);
 	if (N > 0) wire.set(prefix, 0);
-	const written = await sframeEncryptInto(wire, N, header, body, key, ctr);
+	// PHASE 1: pass undefined as aadPrefix → AAD = header only (old format).
+	// Phase 2 will pass `N > 0 ? prefix : undefined` with aadForm='canonical'.
+	const written = await sframeEncryptInto(wire, N, header, body, key, ctr, undefined, 'header');
 	if (trailer) wire.set(trailer, N + written);
 	// wire is a freshly allocated exclusive ArrayBuffer — .buffer is safe to assign
 	// directly without the toExclusiveArrayBuffer copy.
@@ -135,6 +316,8 @@ export async function encodeFrame(
 		bytes: plaintext.byteLength,
 		codec: state.codec,
 	});
+	// A frame encoded — the sender is healthy; end any encode-side starvation.
+	clearEncryptStarve(state);
 }
 
 
@@ -177,6 +360,8 @@ async function tryDecryptWithRatchet(
 	buf: Uint8Array,
 	epoch: number,
 	peerIndex: PeerIndex,
+	aadPrefix?: Uint8Array,
+	aadForm: AadForm = 'header',
 ): Promise<Uint8Array> {
 	const entry = state.epochs.get(epoch);
 	if (!entry) {
@@ -193,7 +378,7 @@ async function tryDecryptWithRatchet(
 		return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 			const ep = state.epochs.get(e);
 			return ep?.keys.get(pi) ?? null;
-		}, { kidCodec: state.kidCodec });
+		}, { kidCodec: state.kidCodec, aadPrefix, aadForm });
 	} catch (err) {
 		firstError = err;
 	}
@@ -220,7 +405,7 @@ async function tryDecryptWithRatchet(
 				return await sframeDecrypt(buf, ({ epoch: e, peerIndex: pi }) => {
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				}, { kidCodec: state.kidCodec });
+				}, { kidCodec: state.kidCodec, aadPrefix, aadForm });
 			} catch {
 				// Step 0 still fails — our frame is at a different step than
 				// the one the first caller found. Fall through to our own
@@ -268,7 +453,7 @@ async function tryDecryptWithRatchet(
 					if (e === epoch && pi === peerIndex) return next;
 					const ep = state.epochs.get(e);
 					return ep?.keys.get(pi) ?? null;
-				}, { kidCodec: state.kidCodec });
+				}, { kidCodec: state.kidCodec, aadPrefix, aadForm });
 				// Success at step N: advance the cached key so subsequent frames at
 				// this step hit immediately without re-deriving.
 				entry.keys.set(peerIndex, next);
@@ -324,24 +509,75 @@ export async function decodeFrame(
 		payload = raw.subarray(0, raw.byteLength - trailer.byteLength);
 	}
 
-	// Codec-aware prefix peel: receiver must know the codec (set via StreamsMsg)
-	// to determine N. Both sides must agree. N=0 when codec is unset (default).
-	// Clamp to frame length to handle truncated/corrupt frames safely.
+	// Phase 1: format tolerance. The receiver accepts three AAD forms
+	// ('header', 'prefix', 'canonical') and, for VP9/AV1, two prefix lengths
+	// (N=0 old, N=1 new). The resolved format is cached per (epoch, peerIndex)
+	// so the common case is 1 AEAD attempt per frame. See sframe.ts for the
+	// AAD form definitions and docs/SECURITY.md for the staged-rollout plan.
 	const rawType = (frame as RTCEncodedVideoFrame).type;
 	const frameKind: FrameKind | undefined =
 		rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
-	const N = Math.min(getUnencryptedBytes(state.codec, frameKind), payload.byteLength);
-	const prefix = payload.subarray(0, N);   // unencrypted prefix (not authenticated)
-	const buf = payload.subarray(N);         // [SFrame header][ciphertext+tag]
+	const codec = state.codec;
+	const codecN = Math.min(getUnencryptedBytes(codec, frameKind), payload.byteLength);
 
 	let hdrKid = -1;
 	let hdrEpoch = -1;
 	let hdrPeerIndex = -1;
 	let hdrCtr = 0n;
+
 	try {
+		// === Format resolution ===
+		// Try cache: parse header at codecN to get (epoch, peerIndex) for lookup.
+		// For VP9/AV1 with N=0 (old format), codecN=0 and the parse succeeds.
+		// For N=1 (new format), codecN=0 and the parse tries to read the prefix
+		// byte as the header start — it will fail or give a wrong kid, and we
+		// fall through to the probe which tries N=1.
+		let cached: FormatGuess | undefined;
+		if (codecN < payload.byteLength) {
+			try {
+				const tHdr = parseHeader(payload.subarray(codecN));
+				const { epoch: tEpoch, peerIndex: tPeer } = state.kidCodec.decode(tHdr.kid);
+				cached = getFormatCache(state, tEpoch, tPeer);
+			} catch { /* header parse at codecN failed — will probe */ }
+		}
+
+		let prefixLen: number;
+		let aadForm: AadForm;
+		let probedPlaintext: Uint8Array | null = null;
+
+		if (cached) {
+			prefixLen = cached.prefixLen;
+			aadForm = cached.aadForm;
+		} else {
+			// Cache miss: probe all format candidates at step 0 (cached key).
+			const probed = await probeFormat(state, payload, codec, frameKind);
+			if (probed) {
+				prefixLen = probed.prefixLen;
+				aadForm = probed.aadForm;
+				probedPlaintext = probed.plaintext;
+				hdrKid = probed.kid;
+				hdrEpoch = probed.epoch;
+				hdrPeerIndex = probed.peerIndex;
+				hdrCtr = probed.ctr;
+			} else {
+				// Probe failed (key ratcheted past step 0, or unknown format).
+				// Fall back to the default (old) format for ratchet retry.
+				prefixLen = codecN;
+				aadForm = 'header';
+			}
+		}
+
+		const prefix = payload.subarray(0, prefixLen);  // unencrypted prefix
+		const buf = payload.subarray(prefixLen);         // [SFrame header][ciphertext+tag]
+
+		// Parse header at the resolved prefixLen.
 		const hdr = parseHeader(buf);
 		const { epoch, peerIndex } = state.kidCodec.decode(hdr.kid);
-		hdrKid = hdr.kid; hdrEpoch = epoch; hdrPeerIndex = peerIndex; hdrCtr = hdr.ctr;
+		if (probedPlaintext === null) {
+			hdrKid = hdr.kid; hdrEpoch = epoch; hdrPeerIndex = peerIndex; hdrCtr = hdr.ctr;
+		}
+
+		// === Gates (stale-epoch, pre-epoch, replay, failure-invalidation) ===
 		// Stale-epoch gate — fire BEFORE any decrypt attempt (spec §7.4).
 		if (epoch < state.currentMinValidEpoch) {
 			state.emit({
@@ -358,26 +594,12 @@ export async function decodeFrame(
 		// (currentEpoch === -1), this receiver is still waiting for its first
 		// KeyExchange identity exchange to complete. Queue the frame for retry
 		// instead of dropping it silently.
-		//
-		// We restrict queuing to the truly-no-epoch case (currentEpoch === -1)
-		// rather than any missing epoch: once the receiver has at least one
-		// epoch installed, a frame for an unknown epoch is a genuine cross-epoch
-		// mismatch (wrong sender state), not a timing race.
-		//
-		// M3.4 deferred — multi-epoch races during rotation surface as
-		// decrypt_failed (not re-queued); distinguish via reason field in events.
 		if (state.currentEpoch === -1) {
 			enqueuePreEpoch(state, frame, peerIndex);
 			return; // not an error from caller's perspective
 		}
 
 		// Anti-replay sliding window (RFC 9605 §9.3, issue #10).
-		// AFTER parseHeader + stale-epoch gate, BEFORE AEAD. A replayed frame
-		// is rejected without consuming ratchet-retry budget or touching
-		// WebCrypto. accept() is called only after a successful decrypt below.
-		// Architecture-council nit #1: in-memory check FIRST (cheap, sync),
-		// durable check only if in-memory passes (avoids the expensive IDB
-		// read on the common replay path).
 		const replayWindow = getReplayWindow(state, epoch, peerIndex);
 		if (!replayWindow.check(hdr.ctr)) {
 			state.emit({
@@ -391,11 +613,7 @@ export async function decodeFrame(
 				{ epoch, peerIndex, ctr: hdr.ctr },
 			);
 		}
-		// Durable cross-reload replay check (CWE-294). Only runs when the
-		// guard is present AND available (IDB + Web Locks). Catches a replayed
-		// frame whose CTR was accepted in a PRIOR session and survived a
-		// reload — the in-memory window was wiped on reload, so without this
-		// check the frame would false-pass.
+		// Durable cross-reload replay check (CWE-294).
 		if (state.durableReplay?.available) {
 			if (!(await state.durableReplay.check(durableReplayKey(epoch, peerIndex), hdr.ctr))) {
 				state.emit({
@@ -411,14 +629,7 @@ export async function decodeFrame(
 			}
 		}
 
-		// Failure-invalidation gate (issue #14, pattern from livekit
-		// ParticipantKeyHandler.ts:58). AFTER parseHeader + stale-epoch gate +
-		// replay check, BEFORE tryDecryptWithRatchet. When the key for
-		// (epoch, peerIndex) has exceeded `failureTolerance` consecutive AEAD
-		// failures, drop the frame WITHOUT attempting AEAD — saving CPU and
-		// surfacing the problem via the `key_invalidated` metric event. The
-		// count is reset by a successful decrypt (recordSuccess) or by a fresh
-		// key install (resetFailureCount in installEpoch).
+		// Failure-invalidation gate (issue #14).
 		if (isKeyInvalid(state, epoch, peerIndex)) {
 			state.emit({
 				type: 'decrypt_failure', reason: 'key_invalid',
@@ -431,7 +642,22 @@ export async function decodeFrame(
 			);
 		}
 
-		const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+		// === Decrypt / accept ===
+		let opened: Uint8Array;
+		if (probedPlaintext !== null) {
+			// Probe already decrypted at step 0 — cache the format and accept.
+			setFormatCache(state, epoch, peerIndex, { prefixLen, aadForm });
+			opened = probedPlaintext;
+		} else {
+			opened = await tryDecryptWithRatchet(
+				state, buf, epoch, peerIndex,
+				prefixLen > 0 ? prefix : undefined, aadForm,
+			);
+			// Cache the format on success (first frame from this sender, or
+			// ratchet fallback succeeded).
+			setFormatCache(state, epoch, peerIndex, { prefixLen, aadForm });
+		}
+
 		// Record the CTR as seen ONLY after a successful AEAD decrypt.
 		replayWindow.accept(hdr.ctr);
 		// Durable accept — persist the CTR so the replay defense survives a
@@ -446,9 +672,9 @@ export async function decodeFrame(
 		recordSuccess(state, epoch, peerIndex);
 
 		// Reassemble: [unencrypted prefix] [decrypted plaintext]
-		const plaintext = new Uint8Array(N + opened.byteLength);
+		const plaintext = new Uint8Array(prefixLen + opened.byteLength);
 		plaintext.set(prefix, 0);
-		plaintext.set(opened, N);
+		plaintext.set(opened, prefixLen);
 		frame.data = toExclusiveArrayBuffer(plaintext);
 		// A frame decoded — the receiver is healthy; end any starvation episode.
 		clearStarve(state);
@@ -498,8 +724,20 @@ export async function decodeFrame(
 }
 
 /**
- * Push a frame into the pre-epoch queue, enforcing the FIFO ring cap.
- * Overflow drops the oldest entry and emits decrypt_failure{reason:'queue_overflow'}.
+ * Push a frame into the pre-epoch queue, enforcing the bounded cap.
+ * Overflow drops the NEWEST entry (tail) and emits
+ * decrypt_failure{reason:'queue_overflow'}.
+ *
+ * Eviction policy: TAIL eviction (drop the newest), NOT head eviction.
+ * The head of a video stream is the keyframe — the one frame that must
+ * survive. Every later frame in the queue is undecodable without it.
+ * Dropping from the head (the previous behaviour, oxpulse-partner-edge#618)
+ * evicted the keyframe first, making every subsequent frame useless.
+ * Tail eviction preserves the oldest frames (including the keyframe) and
+ * sacrifices the newest, which is the least damaging choice: the newest
+ * frame can be re-requested via PLI/FIR, but a lost keyframe stalls the
+ * entire stream until the next periodic keyframe.
+ *
  * Used by both enqueuePreEpoch (initial enqueue) and drainPreEpochQueue
  * (re-enqueue on still-missing key) so cap is enforced on all paths.
  */
@@ -509,8 +747,8 @@ function pushToQueue(
 	peerIndex?: PeerIndex,
 ): void {
 	if (state.preEpochQueue.length >= state.preEpochQueueCap) {
-		// Drop oldest (FIFO ring — shift the front).
-		state.preEpochQueue.shift();
+		// Drop newest (tail) to preserve the keyframe at the head.
+		state.preEpochQueue.pop();
 		state.emit({ type: 'decrypt_failure', reason: 'queue_overflow' });
 		emitMetric(state, { kind: 'queue_drop', reason: 'pre_epoch_full' });
 		// Promote the drop to a first-class, coalesced recovery signal.
@@ -599,13 +837,45 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 		for (const { frame } of pending) {
 			const raw = new Uint8Array(frame.data);
 			try {
-				// Codec-aware prefix peel — mirrors decodeFrame logic.
+				// Phase 1: format tolerance — mirrors decodeFrame logic.
+				// Resolve (prefixLen, aadForm) from cache or probe, then decrypt.
 				const rawType = (frame as RTCEncodedVideoFrame).type;
 				const frameKind: FrameKind | undefined =
 					rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
-				const N = Math.min(getUnencryptedBytes(state.codec, frameKind), raw.byteLength);
-				const prefix = raw.subarray(0, N);
-				const buf = raw.subarray(N);
+				const codec = state.codec;
+				const codecN = Math.min(getUnencryptedBytes(codec, frameKind), raw.byteLength);
+
+				// Try cache: parse header at codecN for (epoch, peerIndex) lookup.
+				let cached: FormatGuess | undefined;
+				if (codecN < raw.byteLength) {
+					try {
+						const tHdr = parseHeader(raw.subarray(codecN));
+						const { epoch: tEpoch, peerIndex: tPeer } = state.kidCodec.decode(tHdr.kid);
+						cached = getFormatCache(state, tEpoch, tPeer);
+					} catch { /* will probe */ }
+				}
+
+				let prefixLen: number;
+				let aadForm: AadForm;
+				let probedPlaintext: Uint8Array | null = null;
+
+				if (cached) {
+					prefixLen = cached.prefixLen;
+					aadForm = cached.aadForm;
+				} else {
+					const probed = await probeFormat(state, raw, codec, frameKind);
+					if (probed) {
+						prefixLen = probed.prefixLen;
+						aadForm = probed.aadForm;
+						probedPlaintext = probed.plaintext;
+					} else {
+						prefixLen = codecN;
+						aadForm = 'header';
+					}
+				}
+
+				const prefix = raw.subarray(0, prefixLen);
+				const buf = raw.subarray(prefixLen);
 
 				const hdr = parseHeader(buf);
 				const { epoch, peerIndex } = state.kidCodec.decode(hdr.kid);
@@ -650,8 +920,6 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					}
 				}
 				// Failure-invalidation gate (issue #14) — same as decodeFrame.
-				// AFTER replay check, BEFORE tryDecryptWithRatchet. A queued frame
-				// for an already-invalidated key is dropped without AEAD.
 				if (isKeyInvalid(state, epoch, peerIndex)) {
 					state.emit({
 						type: 'decrypt_failure', reason: 'key_invalid',
@@ -660,9 +928,19 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 					emitMetric(state, { kind: 'decrypt_fail', code: 'KEY_INVALID', epoch, peerIndex });
 					continue; // drop; do not re-enqueue
 				}
-				// Use the ratchet retry helper so that within-epoch key advances are
-				// also handled for queued frames, consistent with the live decode path.
-				const opened = await tryDecryptWithRatchet(state, buf, epoch, peerIndex);
+
+				// Decrypt: use probed plaintext if available, else ratchet retry.
+				let opened: Uint8Array;
+				if (probedPlaintext !== null) {
+					setFormatCache(state, epoch, peerIndex, { prefixLen, aadForm });
+					opened = probedPlaintext;
+				} else {
+					opened = await tryDecryptWithRatchet(
+						state, buf, epoch, peerIndex,
+						prefixLen > 0 ? prefix : undefined, aadForm,
+					);
+					setFormatCache(state, epoch, peerIndex, { prefixLen, aadForm });
+				}
 				// Record the CTR as seen ONLY after a successful AEAD decrypt.
 				replayWindow.accept(hdr.ctr);
 				// Durable accept — persist the CTR so the replay defense survives a
@@ -674,9 +952,9 @@ export async function drainPreEpochQueue(state: WorkerState): Promise<void> {
 				recordSuccess(state, epoch, peerIndex);
 
 				// Reassemble: [unencrypted prefix] [decrypted plaintext]
-				const plaintext = new Uint8Array(N + opened.byteLength);
+				const plaintext = new Uint8Array(prefixLen + opened.byteLength);
 				plaintext.set(prefix, 0);
-				plaintext.set(opened, N);
+				plaintext.set(opened, prefixLen);
 				frame.data = toExclusiveArrayBuffer(plaintext);
 				// Drained a frame — starvation (if any) has ended.
 				clearStarve(state);

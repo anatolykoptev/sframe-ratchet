@@ -9,6 +9,7 @@ import type { CipherSuite } from './ratchet-crypto.ts';
 import type { SlidingReplayWindow } from './internal/replay.ts';
 import type { DurableReplayGuard } from './chat/durable-replay.ts';
 import type { KidCodec, KidFormat, MlsKidConfig } from './kid-format.ts';
+import type { AadForm } from './sframe.ts';
 
 export type Role = 'sender' | 'receiver';
 export type Side = 'encode' | 'decode';
@@ -125,7 +126,8 @@ export type MetricsEvent =
 	| { kind: 'queue_drop'; reason: 'pre_epoch_full' | 'stale_epoch' | 'replay'; epoch?: number }
 	| { kind: 'replay_drop'; epoch: number; peerIndex: number; ctr: string }
 	| { kind: 'key_invalidated'; epoch: number; peerIndex: number; failures: number }
-	| { kind: 'epoch_advance'; from: number; to: number };
+	| { kind: 'epoch_advance'; from: number; to: number }
+	| { kind: 'encode_drop'; code: string; epoch?: number; peerIndex?: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
@@ -133,6 +135,14 @@ export type OutMsg =
 	| { type: 'metrics'; event: MetricsEvent }
 	| { type: 'decrypt_failure'; reason: 'stale_epoch' | 'decrypt_failed' | 'queue_overflow' | 'decrypt_failed_after_epoch' | 'replay' | 'key_invalid';
 		kid?: number; epoch?: number; peerIndex?: number; ctr?: bigint; detail?: string }
+	/**
+	 * Sender-side frame encode failed and the frame was dropped. The encode
+	 * pipe is NOT torn down — subsequent frames continue to flow. Emitted on
+	 * every encode-side drop so the host app can count them (oxpulse-partner-edge#618).
+	 * `reason` is 'encode_failed' for a frame-level encryption error, or
+	 * 'no_epoch' when no active send epoch is installed.
+	 */
+	| { type: 'encrypt_failure'; reason: 'encode_failed' | 'no_epoch'; detail?: string }
 	/**
 	 * Receiver installed/activated a new epoch (currentEpoch advanced). First-class
 	 * control signal — always emitted, independent of `metricsEnabled`. The main
@@ -169,6 +179,25 @@ export interface EpochEntry {
 	 * Cleaned up automatically when the EpochEntry is deleted by wipeEpoch().
 	 */
 	ratchetSteps: Map<PeerIndex, number>;
+}
+
+/**
+ * Resolved wire-format guess for a (epoch, peerIndex) sender. Cached after the
+ * first successful decrypt so subsequent frames use exactly 1 AEAD attempt
+ * instead of re-deriving the format every frame.
+ *
+ * - `prefixLen`: number of cleartext prefix bytes the sender leaves in the
+ *   clear. For VP8/H264/Opus this is fixed by the codec; for VP9/AV1 it can
+ *   be 0 (old/phase-1 sender) or 1 (new/phase-2 sender).
+ * - `aadForm`: how the sender constructs AAD from the prefix and header.
+ *   See `AadForm` in sframe.ts for the three forms.
+ *
+ * The cache is keyed by (epoch, peerIndex) and cleared on epoch wipe
+ * (wipeEpoch) so a rotation never inherits a stale format guess.
+ */
+export interface FormatGuess {
+	prefixLen: number;
+	aadForm: AadForm;
 }
 
 export interface WorkerState {
@@ -292,6 +321,26 @@ export interface WorkerState {
 	 * after the loop settles (success or exhaustion).
 	 */
 	ratchetPromises: Map<string, Promise<Uint8Array>>;
+	/**
+	 * Per-(epoch, peerIndex) wire-format cache for receive-side tolerance
+	 * (phase 1). Outer key = epoch, inner key = peerIndex. After the first
+	 * successful decrypt from a sender, the resolved (prefixLen, aadForm) is
+	 * cached so subsequent frames use exactly 1 AEAD attempt instead of
+	 * re-deriving the format every frame. Cleared on epoch wipe (wipeEpoch)
+	 * so a rotation never inherits a stale format guess.
+	 */
+	formatCache: Map<number, Map<number, FormatGuess>>;
+	/**
+	 * Encode-side starvation coalescing (LOW finding). Mirrors the decode-side
+	 * `starve*` fields: `encrypt_failure` OutMsg is emitted on the first drop
+	 * of an episode, then at most once per `STARVE_COALESCE_MS`. Reset by a
+	 * successful encode. Prevents 30/s `encrypt_failure` spam under a
+	 * persistent encode-side fault.
+	 */
+	encryptStarveActive: boolean;
+	encryptStarveSinceMs: number;
+	encryptStarveFramesDropped: number;
+	encryptStarveLastEmitMs: number;
 	/**
 	 * Durable cross-reload replay guard for media frames (CWE-294). Opt-in —
 	 * default null. When present, persists accepted CTRs to IndexedDB so the

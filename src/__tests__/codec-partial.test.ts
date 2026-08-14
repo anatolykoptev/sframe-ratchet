@@ -182,13 +182,19 @@ describe('AEAD failure on ciphertext flip', () => {
 
 // ---------------------------------------------------------------------------
 // 5. Flipping a byte in the unencrypted prefix does NOT cause AEAD failure
+//    in phase 1 (prefix is NOT authenticated — AAD = header only).
+//    Phase 2 will switch to canonical AAD (be16(len)||prefix||header) which
+//    WILL reject prefix tampering. See falsification-av1-vp9-encode.test.ts
+//    for the phase-2 authentication test.
 // ---------------------------------------------------------------------------
 
-describe('no AEAD failure on prefix flip', () => {
-	it('flip a byte in the unencrypted prefix → decode does NOT throw (AEAD unaffected)', async () => {
-		// NOTE: this is the documented trade-off — prefix is not authenticated.
-		// A corrupt prefix may produce garbage decoded frame content, but it
-		// does NOT trigger an AES-GCM authentication failure.
+describe('prefix flip does NOT cause AEAD failure (phase 1: prefix unauthenticated)', () => {
+	it('flip a byte in the unencrypted prefix → decode SUCCEEDS (prefix not in AAD)', async () => {
+		// PHASE 1: the unencrypted prefix is NOT included in AES-GCM AAD.
+		// The sender emits AAD = header only. A flip in the prefix does NOT
+		// change the AAD, so the AEAD tag still verifies. The decoded frame
+		// will have a corrupted prefix but the decrypted body is correct.
+		// This is the documented trade-off (issue #50) — phase 2 will close it.
 		const codec: Codec = 'vp8';
 		const frameType = 'key'; // N = 10
 		const PLAINTEXT = new Uint8Array(64);
@@ -202,13 +208,13 @@ describe('no AEAD failure on prefix flip', () => {
 		wire[5] ^= 0xff; // flip byte 5 (inside the 10-byte vp8 keyframe prefix)
 
 		const decFrame = makeVideoFrame(wire, frameType);
-		// Should NOT throw — AEAD covers only the post-prefix body.
-		await expect(decodeFrame(decState, decFrame)).resolves.toBeUndefined();
-
-		// Decrypted content has the flipped prefix but correct encrypted region.
-		const result = new Uint8Array(decFrame.data);
-		expect(result[5]).toBe(PLAINTEXT[5] ^ 0xff); // prefix byte is flipped
-		expect(result[10]).toBe(PLAINTEXT[10]);        // encrypted region is intact
+		// Should SUCCEED — AEAD does not cover the prefix in phase 1.
+		await decodeFrame(decState, decFrame);
+		// The decrypted body (bytes 10..64) is correct; the prefix (bytes 0..10)
+		// is corrupted (byte 5 was flipped).
+		const dec = new Uint8Array(decFrame.data);
+		expect(dec.subarray(10)).toEqual(PLAINTEXT.subarray(10));
+		expect(dec[5]).toBe(PLAINTEXT[5] ^ 0xff); // prefix corrupted
 	});
 });
 
@@ -248,7 +254,9 @@ describe('default path (codec=undefined) unchanged', () => {
 		expect(new Uint8Array(decFrame.data)).toEqual(PLAINTEXT);
 	});
 
-	it('vp9 and av1 also produce N=0 — indistinguishable from no-codec path', async () => {
+	it('vp9 and av1 produce N=0 in phase 1 — full encryption, round-trips', async () => {
+		// PHASE 1: VP9/AV1 use N=0 (full encryption). The SFU cannot see
+		// keyframes in phase 1. Phase 2 will set N=1 so byte 0 is visible.
 		for (const codec of ['vp9', 'av1'] as Codec[]) {
 			const { enc: encState, dec: decState } = await makeStatePair(codec);
 
@@ -256,9 +264,11 @@ describe('default path (codec=undefined) unchanged', () => {
 			const encFrame = makeVideoFrame(PLAINTEXT, 'key');
 			await encodeFrame(encState, encFrame, 'key');
 
-			// Wire starts with SFrame header (no prefix).
+			// N=0: wire starts with the SFrame header (no prefix byte in the clear).
 			const wire = new Uint8Array(encFrame.data);
 			expect(() => parseHeader(wire)).not.toThrow();
+			// First byte is NOT the plaintext prefix — it's the SFrame header.
+			expect(wire[0]).not.toBe(PLAINTEXT[0]);
 
 			const decFrame = makeVideoFrame(wire, 'key');
 			await decodeFrame(decState, decFrame);
