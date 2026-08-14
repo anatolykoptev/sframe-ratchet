@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.6...v0.5.7) (2026-08-14)
+
+
+### Added
+
+* **mls:** migrate to ts-mls 2.0 params-object API ([#64](https://github.com/anatolykoptev/sframe-ratchet/issues/64)) ([1747e24](https://github.com/anatolykoptev/sframe-ratchet/commit/1747e24b8d3cdcf5d24de6bb70ebf7363cb81c72))
+
 ## [0.5.6](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.5...v0.5.6) (2026-08-13)
 
 
