@@ -73,7 +73,7 @@
   "peerDependencies": {
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
-    "ts-mls": "^1.6.2"
+    "ts-mls": "^2.0.0-rc.16"
   },
   "peerDependenciesMeta": {
     "ts-mls": {
@@ -84,11 +84,12 @@
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2.0.1",
     "@noble/hashes": "^2.0.1",
+    "@noble/post-quantum": "^0.6.1",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.9.0",
-    "ts-mls": "^1.6.2",
+    "ts-mls": "^2.0.0-rc.16",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"

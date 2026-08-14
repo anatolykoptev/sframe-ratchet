@@ -13,26 +13,26 @@ import {
 export const CS_NAME = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const;
 
 export async function getCiphersuiteImpl(): Promise<CiphersuiteImpl> {
-	const { nobleCryptoProvider, getCiphersuiteFromName } = await import('ts-mls');
-	return nobleCryptoProvider.getCiphersuiteImpl(getCiphersuiteFromName(CS_NAME));
+	const { nobleCryptoProvider, getCiphersuiteImpl: getImpl } = await import('ts-mls');
+	return getImpl(CS_NAME, nobleCryptoProvider);
 }
 
-export function makeBasicCredential(identity: string): { credentialType: 'basic'; identity: Uint8Array } {
-	return { credentialType: 'basic', identity: new TextEncoder().encode(identity) };
+export async function makeBasicCredential(identity: string): Promise<{ credentialType: number; identity: Uint8Array }> {
+	const { defaultCredentialTypes } = await import('ts-mls');
+	return { credentialType: defaultCredentialTypes.basic, identity: new TextEncoder().encode(identity) };
 }
 
 export async function makeMember(
 	identity: string,
 	cs: CiphersuiteImpl,
 ): Promise<{ publicPackage: KeyPackage; privatePackage: PrivateKeyPackage }> {
-	const { defaultCapabilities, defaultLifetime } = await import('ts-mls');
-	return generateKeyPackage(
-		makeBasicCredential(identity),
-		defaultCapabilities(),
-		defaultLifetime,
-		[],
-		cs,
-	);
+	const { defaultCapabilities, defaultLifetime, defaultCredentialTypes } = await import('ts-mls');
+	return generateKeyPackage({
+		credential: { credentialType: defaultCredentialTypes.basic, identity: new TextEncoder().encode(identity) },
+		capabilities: defaultCapabilities(),
+		lifetime: defaultLifetime(),
+		cipherSuite: cs,
+	});
 }
 
 /** Create a 2-member MLS group: Alice creates, adds Bob via commit. */
@@ -41,25 +41,24 @@ export async function createTwoMemberGroup(
 	alice: { publicPackage: KeyPackage; privatePackage: PrivateKeyPackage },
 	bob: { publicPackage: KeyPackage; privatePackage: PrivateKeyPackage },
 ): Promise<{ aliceState: ClientState; bobState: ClientState; groupId: Uint8Array }> {
-	const { createGroup, joinGroup, createCommit, emptyPskIndex } = await import('ts-mls');
+	const { createGroup, joinGroup, createCommit, defaultProposalTypes, unsafeTestingAuthenticationService } = await import('ts-mls');
+	const ctx = { cipherSuite: cs, authService: unsafeTestingAuthenticationService };
 	const groupId = new TextEncoder().encode('test-group');
-	let aliceState = await createGroup(groupId, alice.publicPackage, alice.privatePackage, [], cs);
-	const commitResult = await createCommit(
-		{ state: aliceState, cipherSuite: cs },
-		{
-			extraProposals: [{ proposalType: 'add', add: { keyPackage: bob.publicPackage } }],
-			ratchetTreeExtension: true,
-			wireAsPublicMessage: true,
-		},
-	);
+	let aliceState = await createGroup({ context: ctx, groupId, keyPackage: alice.publicPackage, privateKeyPackage: alice.privatePackage });
+	const commitResult = await createCommit({
+		context: ctx,
+		state: aliceState,
+		extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: bob.publicPackage } }],
+		ratchetTreeExtension: true,
+		wireAsPublicMessage: true,
+	});
 	aliceState = commitResult.newState;
 	if (!commitResult.welcome) throw new Error('createCommit did not produce a welcome');
-	const bobState = await joinGroup(
-		commitResult.welcome,
-		bob.publicPackage,
-		bob.privatePackage,
-		emptyPskIndex,
-		cs,
-	);
+	const bobState = await joinGroup({
+		context: ctx,
+		welcome: commitResult.welcome.welcome,
+		keyPackage: bob.publicPackage,
+		privateKeys: bob.privatePackage,
+	});
 	return { aliceState, bobState, groupId };
 }

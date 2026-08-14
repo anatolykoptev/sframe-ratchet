@@ -1,6 +1,6 @@
 // Tests for the MLS ratchet provider — bridges ts-mls group state → SFrame AEAD.
 //
-// These tests create a REAL MLS group with ts-mls (2 members: Alice + Bob),
+// These tests create a REAL MLS group with ts-mls 2.0 (2 members: Alice + Bob),
 // advance an epoch, and verify that:
 //   1. Both members derive the same ChainKey via MLS exporter.
 //   2. Both members build the same gap-free peerIndexMap.
@@ -15,14 +15,20 @@ import {
 	joinGroup,
 	createCommit,
 	generateKeyPackage,
-	emptyPskIndex,
 	acceptAll,
 	processPublicMessage,
-	decodeMlsMessage,
 	zeroOutUint8Array,
 	bytesToBase64,
+	defaultCapabilities,
+	defaultLifetime,
+	defaultCredentialTypes,
+	defaultProposalTypes,
+	unsafeTestingAuthenticationService,
+	getCiphersuiteImpl,
+	nobleCryptoProvider,
 	type ClientState,
 	type CiphersuiteImpl,
+	type MlsContext,
 } from 'ts-mls';
 import { sframeEncrypt, sframeDecrypt } from '../sframe.ts';
 import { deriveEpochKeyTable } from '../ratchet-crypto.ts';
@@ -40,13 +46,16 @@ import type { PeerIndex } from '../types.ts';
 
 const CS_NAME = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const;
 
-async function getCiphersuiteImpl(): Promise<CiphersuiteImpl> {
-	const { nobleCryptoProvider, getCiphersuiteFromName } = await import('ts-mls');
-	return nobleCryptoProvider.getCiphersuiteImpl(getCiphersuiteFromName(CS_NAME));
+async function getCs(): Promise<CiphersuiteImpl> {
+	return getCiphersuiteImpl(CS_NAME, nobleCryptoProvider);
 }
 
-function makeBasicCredential(identity: string): { credentialType: 'basic'; identity: Uint8Array } {
-	return { credentialType: 'basic', identity: new TextEncoder().encode(identity) };
+async function makeCtx(cs: CiphersuiteImpl): Promise<MlsContext> {
+	return { cipherSuite: cs, authService: unsafeTestingAuthenticationService };
+}
+
+function makeCred(identity: string) {
+	return { credentialType: defaultCredentialTypes.basic, identity: new TextEncoder().encode(identity) };
 }
 
 /** Create a key package for a member with a basic credential. */
@@ -54,14 +63,12 @@ async function makeMember(
 	identity: string,
 	cs: CiphersuiteImpl,
 ): Promise<{ publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage }> {
-	const { defaultCapabilities, defaultLifetime } = await import('ts-mls');
-	return generateKeyPackage(
-		makeBasicCredential(identity),
-		defaultCapabilities(),
-		defaultLifetime,
-		[],
-		cs,
-	);
+	return generateKeyPackage({
+		credential: makeCred(identity),
+		capabilities: defaultCapabilities(),
+		lifetime: defaultLifetime(),
+		cipherSuite: cs,
+	});
 }
 
 /** Create a 2-member MLS group: Alice creates, adds Bob via commit. */
@@ -70,33 +77,32 @@ async function createTwoMemberGroup(
 	alice: { publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage },
 	bob: { publicPackage: import('ts-mls').KeyPackage; privatePackage: import('ts-mls').PrivateKeyPackage },
 ): Promise<{ aliceState: ClientState; bobState: ClientState }> {
+	const ctx = await makeCtx(cs);
 	const groupId = new TextEncoder().encode('test-group');
 
 	// Alice creates the group (epoch 0, alone).
-	let aliceState = await createGroup(groupId, alice.publicPackage, alice.privatePackage, [], cs);
+	let aliceState = await createGroup({ context: ctx, groupId, keyPackage: alice.publicPackage, privateKeyPackage: alice.privatePackage });
 
 	// Alice creates a commit adding Bob.
-	const commitResult = await createCommit(
-		{ state: aliceState, cipherSuite: cs },
-		{
-			extraProposals: [{ proposalType: 'add', add: { keyPackage: bob.publicPackage } }],
-			ratchetTreeExtension: true,
-			wireAsPublicMessage: true,
-		},
-	);
+	const commitResult = await createCommit({
+		context: ctx,
+		state: aliceState,
+		extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: bob.publicPackage } }],
+		ratchetTreeExtension: true,
+		wireAsPublicMessage: true,
+	});
 
 	// Alice advances to the new epoch.
 	aliceState = commitResult.newState;
 
 	// Bob joins via the welcome message.
 	if (!commitResult.welcome) throw new Error('createCommit did not produce a welcome');
-	const bobState = await joinGroup(
-		commitResult.welcome,
-		bob.publicPackage,
-		bob.privatePackage,
-		emptyPskIndex,
-		cs,
-	);
+	const bobState = await joinGroup({
+		context: ctx,
+		welcome: commitResult.welcome.welcome,
+		keyPackage: bob.publicPackage,
+		privateKeys: bob.privatePackage,
+	});
 
 	return { aliceState, bobState };
 }
@@ -116,7 +122,7 @@ function makeMockFrameCryptor(): { mock: FrameCryptor; setEpochCalls: Array<{ ep
 
 describe('MlsRatchetProvider', () => {
 	it('two members derive the same ChainKey + peerIndexMap from the same MLS epoch', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const bob = await makeMember('bob', cs);
 		const { aliceState, bobState } = await createTwoMemberGroup(cs, alice, bob);
@@ -162,7 +168,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('peerIndexMap is §7.8-valid (gap-free, dense 0..N-1)', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const bob = await makeMember('bob', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, bob);
@@ -182,7 +188,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('SFrame encrypt/decrypt round-trips with MLS-derived ChainKey', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const bob = await makeMember('bob', cs);
 		const { aliceState, bobState } = await createTwoMemberGroup(cs, alice, bob);
@@ -229,7 +235,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('epoch overflow guard throws RangeError', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, await makeMember('bob', cs));
 
@@ -245,7 +251,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('raw ChainKey is zeroized after applyEpoch', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, await makeMember('bob', cs));
 
@@ -273,7 +279,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('epoch authenticator is surfaced via onEpochAuthenticator callback', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, await makeMember('bob', cs));
 
@@ -296,7 +302,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('onEpochApplied callback fires with epoch + peerIndexMap', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, await makeMember('bob', cs));
 
@@ -316,7 +322,7 @@ describe('MlsRatchetProvider', () => {
 	});
 
 	it('dispose() prevents subsequent applyEpoch calls', async () => {
-		const cs = await getCiphersuiteImpl();
+		const cs = await getCs();
 		const alice = await makeMember('alice', cs);
 		const { aliceState } = await createTwoMemberGroup(cs, alice, await makeMember('bob', cs));
 
@@ -333,7 +339,7 @@ describe('MlsRatchetProvider', () => {
 
 	it('defaultCredentialToPeerId: basic credential → base64(identity)', () => {
 		const leaf = {
-			credential: { credentialType: 'basic', identity: new TextEncoder().encode('alice') },
+			credential: { credentialType: defaultCredentialTypes.basic, identity: new TextEncoder().encode('alice') },
 			signaturePublicKey: new Uint8Array(32),
 		} as any;
 		expect(defaultCredentialToPeerId(leaf)).toBe('YWxpY2U='); // base64('alice')
@@ -342,7 +348,7 @@ describe('MlsRatchetProvider', () => {
 	it('defaultCredentialToPeerId: X509 credential → base64(signaturePublicKey)', () => {
 		const sigKey = new Uint8Array(32).fill(0xAB);
 		const leaf = {
-			credential: { credentialType: 'x509', certificates: [] },
+			credential: { credentialType: defaultCredentialTypes.x509, certificates: [] },
 			signaturePublicKey: sigKey,
 		} as any;
 		// base64 of 32 bytes of 0xAB — ts-mls bytesToBase64 omits padding

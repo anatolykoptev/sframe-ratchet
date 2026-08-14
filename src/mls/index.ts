@@ -27,14 +27,15 @@ import {
 	mlsExporter,
 	zeroOutUint8Array,
 	bytesToBase64,
-	getCiphersuiteFromName,
+	getCiphersuiteImpl,
 	nobleCryptoProvider,
+	getGroupMembers,
+	defaultCredentialTypes,
 	type ClientState,
 	type CiphersuiteImpl,
 	type LeafNode,
 	type Credential,
 } from 'ts-mls';
-import { getGroupMembers } from 'ts-mls/clientState.js';
 import { buildPeerIndexMap, validatePeerIndexMap } from '../ratchet-ids.ts';
 import { suiteParams, type CipherSuite } from '../ratchet-crypto.ts';
 import type { PeerIndex } from '../types.ts';
@@ -120,8 +121,9 @@ export interface MlsRatchetProvider {
  */
 export function defaultCredentialToPeerId(leaf: LeafNode): string {
 	const cred = leaf.credential as Credential;
-	if (cred.credentialType === 'basic') {
-		return bytesToBase64(cred.identity);
+	// ts-mls 2.0: credentialType is numeric (defaultCredentialTypes.basic = 1)
+	if (typeof cred.credentialType === 'number' && cred.credentialType === defaultCredentialTypes.basic) {
+		return bytesToBase64((cred as { identity: Uint8Array }).identity);
 	}
 	// X509 or custom: use signature public key as a stable, unique peerId.
 	return bytesToBase64(leaf.signaturePublicKey);
@@ -226,8 +228,9 @@ export async function deriveMlsEpochMaterial(
  *
  * @example
  * ```ts
- * const cs = await nobleCryptoProvider.getCiphersuiteImpl(
- *   getCiphersuiteFromName('MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519'),
+ * const cs = await getCiphersuiteImpl(
+ *   'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
+ *   nobleCryptoProvider,
  * );
  * const state = await createGroup(groupId, keyPackage, privateKeyPackage, [], cs);
  * const provider = createMlsRatchetProvider({
@@ -297,7 +300,7 @@ export function createMlsRatchetProvider(opts: MlsRatchetProviderOptions): MlsRa
 // ---- Re-exports for convenience -------------------------------------------
 
 export {
-	getCiphersuiteFromName,
+	getCiphersuiteImpl,
 	nobleCryptoProvider,
 	type CiphersuiteImpl,
 	type ClientState,
