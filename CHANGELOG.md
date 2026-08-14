@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.7...v0.5.8) (2026-08-14)
+
+
+### Fixed
+
+* **worker:** phase 1 — receiver accepts both wire formats; sender unchanged ([#68](https://github.com/anatolykoptev/sframe-ratchet/issues/68)) ([1d2f701](https://github.com/anatolykoptev/sframe-ratchet/commit/1d2f701eee90d0a068299e2ea7bb7c3dc6595200))
+
 ## [Unreleased]
 
 ### Added — Phase 1: receive-side wire-format tolerance
