@@ -30,6 +30,7 @@ import {
 	getCiphersuiteImpl,
 	nobleCryptoProvider,
 	getGroupMembers,
+	defaultCredentialTypes,
 	type ClientState,
 	type CiphersuiteImpl,
 	type LeafNode,
@@ -121,7 +122,7 @@ export interface MlsRatchetProvider {
 export function defaultCredentialToPeerId(leaf: LeafNode): string {
 	const cred = leaf.credential as Credential;
 	// ts-mls 2.0: credentialType is numeric (defaultCredentialTypes.basic = 1)
-	if (typeof cred.credentialType === 'number' && cred.credentialType === 1) {
+	if (typeof cred.credentialType === 'number' && cred.credentialType === defaultCredentialTypes.basic) {
 		return bytesToBase64((cred as { identity: Uint8Array }).identity);
 	}
 	// X509 or custom: use signature public key as a stable, unique peerId.

@@ -348,7 +348,7 @@ describe('MlsRatchetProvider', () => {
 	it('defaultCredentialToPeerId: X509 credential → base64(signaturePublicKey)', () => {
 		const sigKey = new Uint8Array(32).fill(0xAB);
 		const leaf = {
-			credential: { credentialType: 'x509', certificates: [] },
+			credential: { credentialType: defaultCredentialTypes.x509, certificates: [] },
 			signaturePublicKey: sigKey,
 		} as any;
 		// base64 of 32 bytes of 0xAB — ts-mls bytesToBase64 omits padding
