@@ -386,6 +386,24 @@ export class FrameCryptor {
 		}
 	}
 
+	/**
+	 * Pack consecutive Opus frames of this sender's audio into one packet of
+	 * `ms` milliseconds before encryption (RFC 6716 §3.2 multi-frame packets;
+	 * see opus-pack.ts). 20 turns it off (the default); 40-120 in 20 ms steps.
+	 * Receivers need nothing — every Opus decoder reads multi-frame packets.
+	 *
+	 * Cuts the per-packet tax (RTP + SRTP + SFrame + UDP/IP ≈ 90 B) by the
+	 * packing factor, at the cost of up to `ms - 20` ms of added latency and
+	 * of losing `ms` of audio per lost packet. Call only for an Opus sender
+	 * that does not use RED: the worker cannot always see the codec.
+	 * Takes effect on the next frame; safe to call at any time.
+	 */
+	setAudioPacking(ms: number): void {
+		if (this.transitOnly || this.role !== 'sender') return;
+		this.ensureInit();
+		this.worker.postMessage({ type: 'set-audio-packing', ms });
+	}
+
 	/** Detach all transforms. Safe to call multiple times. */
 	detach(): void {
 		for (const fn of this.attached) fn();

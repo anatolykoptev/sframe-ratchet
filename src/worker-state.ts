@@ -12,6 +12,7 @@ import { zeroize } from './internal/buffer.ts';
 import { emitMetric } from './metrics.ts';
 import { DEFAULT_CIPHER_SUITE } from './ratchet-crypto.ts';
 import { DurableReplayGuard } from './chat/durable-replay.ts';
+import { OPUS_FRAME_20MS_SAMPLES } from './opus-pack.ts';
 import {
 	GRACE_WINDOW_MS,
 	PRE_EPOCH_QUEUE_CAP,
@@ -43,6 +44,7 @@ export function createWorkerState(emit: (msg: OutMsg) => void): WorkerState {
 		replayWindowSize: 64,
 		replayWindows: new Map(),
 		metricsEnabled: false,
+		audioPackSamples: OPUS_FRAME_20MS_SAMPLES,
 		now: () => performance.now(),
 		preEpochQueueCap: PRE_EPOCH_QUEUE_CAP,
 		starveActive: false,
@@ -121,6 +123,14 @@ export async function handleMessage(state: WorkerState, msg: InMsg): Promise<voi
 		case 'set-metrics-enabled':
 			state.metricsEnabled = msg.enabled;
 			return;
+		case 'set-audio-packing': {
+			// 20 ms steps, 20..120 ms (RFC 6716 §3.2.5). Anything else is off.
+			const ms = Math.floor(msg.ms);
+			state.audioPackSamples = Number.isFinite(ms) && ms % 20 === 0 && ms >= 20 && ms <= 120
+				? (ms / 20) * OPUS_FRAME_20MS_SAMPLES
+				: OPUS_FRAME_20MS_SAMPLES;
+			return;
+		}
 		case 'set-replay-window': {
 			state.replayWindowSize = Math.max(0, Math.floor(msg.size));
 			// Existing windows were created with the old size — clear them all

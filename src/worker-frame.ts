@@ -22,6 +22,7 @@ import { STARVE_COALESCE_MS, type FrameKind, type Side, type WorkerState, type F
 import { toArrayBuffer as toExclusiveArrayBuffer } from './internal/buffer.js';
 import { ctEndsWith } from './internal/constant-time.js';
 import { getUnencryptedBytes } from './codec-partial.ts';
+import { OpusPacker } from './opus-pack.ts';
 import type { PeerIndex } from './types.ts';
 import { KeyNotFoundError, KeyInvalidError, QueueFullError, RatchetWindowExhaustedError, ReplayError, StaleEpochError, AEADAuthError } from './errors.ts';
 import { SlidingReplayWindow } from './internal/replay.ts';
@@ -196,64 +197,111 @@ function clearEncryptStarve(state: WorkerState): void {
 	state.encryptStarveLastEmitMs = 0;
 }
 
+/** An encoded AUDIO frame carries no `type`; a video frame has 'key' | 'delta' | 'empty'. */
+function isAudioFrame(frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame): frame is RTCEncodedAudioFrame {
+	return (frame as RTCEncodedVideoFrame).type === undefined;
+}
+
+/** The frame's RTP timestamp, or undefined when the browser does not expose it
+ *  (then the packer cannot prove two frames are contiguous and passes through). */
+function rtpTimestampOf(frame: RTCEncodedAudioFrame): number | undefined {
+	const md = (frame as { getMetadata?: () => { rtpTimestamp?: number; mimeType?: string } }).getMetadata?.();
+	if (md?.mimeType !== undefined && md.mimeType.toLowerCase() !== 'audio/opus') return undefined;
+	if (typeof md?.rtpTimestamp === 'number') return md.rtpTimestamp;
+	const legacy = (frame as { timestamp?: unknown }).timestamp;
+	return typeof legacy === 'number' ? legacy : undefined;
+}
+
 export function pipe(
 	state: WorkerState,
 	side: Side,
 	readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>,
 	writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>,
 ): void {
+	// One packer per stream: a sender worker serves the audio AND the video
+	// sender of a peer, each through its own pipe.
+	const packer = side === 'encode' ? new OpusPacker<RTCEncodedAudioFrame>() : null;
+	let reportedPack = { packed: 0, single: 0, staleDropped: 0 };
+
+	async function processFrame(
+		frame: RTCEncodedVideoFrame | RTCEncodedAudioFrame,
+		controller: TransformStreamDefaultController<RTCEncodedVideoFrame | RTCEncodedAudioFrame>,
+	): Promise<void> {
+		// Derive VP8 frame kind from the native encoded-frame metadata.
+		// RTCEncodedVideoFrame.type is 'key' | 'delta'; audio frames have no
+		// such property. Map to our FrameKind ('key' | 'inter').
+		const rawType = (frame as RTCEncodedVideoFrame).type;
+		const frameKind: FrameKind | undefined =
+			rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
+		try {
+			if (side === 'encode') await encodeFrame(state, frame, frameKind);
+			else await decodeFrame(state, frame);
+			controller.enqueue(frame);
+		} catch (err) {
+			// M3.3 race gotcha #1: a sender-side frame may arrive at the
+			// transform BEFORE the first epoch propagates over DC id:1.
+			// `encodeFrame` throws "worker: no active send epoch" in that
+			// window. The frame is dropped (not queued) — by the time the
+			// epoch lands the encoder has already moved on, and a delayed
+			// frame would carry a stale CTR.
+			const msg = err instanceof Error ? err.message : String(err);
+			const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
+
+			if (side === 'encode') {
+				// Encode-side: do NOT rethrow. A rethrow rejects pipeTo, and a
+				// rejected pipeTo does not recover — the sender's media stops
+				// for the rest of the call (oxpulse-partner-edge#618). Drop the
+				// frame, count it, and let the next frame flow. The decode side
+				// already drops without rethrowing; this removes the asymmetry.
+				const reason = msg === 'worker: no active send epoch' ? 'no_epoch' : 'encode_failed';
+				// Distinguish the most common failure in the metric code: the
+				// 'no_epoch' error carries no `.code` property, so it would
+				// otherwise show as 'UNKNOWN'. The encrypt_failure OutMsg
+				// already distinguishes via `reason`; make the metric match.
+				const metricCode = reason === 'no_epoch' ? 'NO_EPOCH' : errCode;
+				console.warn(`[gc:e2e] encode drop (${reason}): ${msg}`);
+				emitMetric(state, { kind: 'encode_drop', code: metricCode });
+				// Coalesce encrypt_failure to at most once per STARVE_COALESCE_MS
+				// (LOW finding: 30/s spam under a persistent fault).
+				noteEncryptDrop(state, reason, msg);
+			} else {
+				// Decode-side: decodeFrame already called state.emit(decrypt_failure)
+				// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
+				// so developers can see individual frame drops without prod noise.
+				if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
+					console.warn('[sframe] decode drop', { reason: msg });
+				}
+			}
+			// Frame is dropped — not enqueued. The pipe survives.
+		}
+	}
+
 	const transform = new TransformStream<
 		RTCEncodedVideoFrame | RTCEncodedAudioFrame,
 		RTCEncodedVideoFrame | RTCEncodedAudioFrame
 	>({
 		async transform(frame, controller) {
-			// Derive VP8 frame kind from the native encoded-frame metadata.
-			// RTCEncodedVideoFrame.type is 'key' | 'delta'; audio frames have no
-			// such property. Map to our FrameKind ('key' | 'inter').
-			const rawType = (frame as RTCEncodedVideoFrame).type;
-			const frameKind: FrameKind | undefined =
-				rawType === 'key' ? 'key' : rawType === 'delta' ? 'inter' : undefined;
-			try {
-				if (side === 'encode') await encodeFrame(state, frame, frameKind);
-				else await decodeFrame(state, frame);
-				controller.enqueue(frame);
-			} catch (err) {
-				// M3.3 race gotcha #1: a sender-side frame may arrive at the
-				// transform BEFORE the first epoch propagates over DC id:1.
-				// `encodeFrame` throws "worker: no active send epoch" in that
-				// window. The frame is dropped (not queued) — by the time the
-				// epoch lands the encoder has already moved on, and a delayed
-				// frame would carry a stale CTR.
-				const msg = err instanceof Error ? err.message : String(err);
-				const errCode = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN';
-
-				if (side === 'encode') {
-					// Encode-side: do NOT rethrow. A rethrow rejects pipeTo, and a
-					// rejected pipeTo does not recover — the sender's media stops
-					// for the rest of the call (oxpulse-partner-edge#618). Drop the
-					// frame, count it, and let the next frame flow. The decode side
-					// already drops without rethrowing; this removes the asymmetry.
-					const reason = msg === 'worker: no active send epoch' ? 'no_epoch' : 'encode_failed';
-					// Distinguish the most common failure in the metric code: the
-					// 'no_epoch' error carries no `.code` property, so it would
-					// otherwise show as 'UNKNOWN'. The encrypt_failure OutMsg
-					// already distinguishes via `reason`; make the metric match.
-					const metricCode = reason === 'no_epoch' ? 'NO_EPOCH' : errCode;
-					console.warn(`[gc:e2e] encode drop (${reason}): ${msg}`);
-					emitMetric(state, { kind: 'encode_drop', code: metricCode });
-					// Coalesce encrypt_failure to at most once per STARVE_COALESCE_MS
-					// (LOW finding: 30/s spam under a persistent fault).
-					noteEncryptDrop(state, reason, msg);
-				} else {
-					// Decode-side: decodeFrame already called state.emit(decrypt_failure)
-					// before rethrowing. Add a debug breadcrumb behind ?__e2e_debug=1
-					// so developers can see individual frame drops without prod noise.
-					if ((globalThis as Record<string, unknown>).__e2e_debug === true) {
-						console.warn('[sframe] decode drop', { reason: msg });
+			// Opus frame packing (opus-pack.ts), before encryption so one packed
+			// packet is one SFrame. Off unless the app sent set-audio-packing;
+			// with it off and nothing held, frames take the path below untouched.
+			if (packer && isAudioFrame(frame)) {
+				packer.setTarget(state.audioPackSamples);
+				if (packer.active) {
+					for (const f of packer.push(frame, rtpTimestampOf(frame))) await processFrame(f, controller);
+					const st = packer.stats;
+					if (st.packed + st.single + st.staleDropped - reportedPack.packed - reportedPack.single - reportedPack.staleDropped >= 50) {
+						emitMetric(state, {
+							kind: 'audio_pack',
+							packed: st.packed - reportedPack.packed,
+							single: st.single - reportedPack.single,
+							staleDropped: st.staleDropped - reportedPack.staleDropped,
+						});
+						reportedPack = { ...st };
 					}
+					return;
 				}
-				// Frame is dropped — not enqueued. The pipe survives.
 			}
+			await processFrame(frame, controller);
 		},
 	});
 	readable.pipeThrough(transform).pipeTo(writable).catch(() => {

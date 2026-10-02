@@ -4,6 +4,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     worker: 'src/worker.ts',
+    'opus-pack': 'src/opus-pack.ts',
     'kex-simple': 'src/kex-simple.ts',
     'chat/index': 'src/chat/index.ts',
     'chat/mls': 'src/chat/mls.ts',

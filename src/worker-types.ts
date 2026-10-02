@@ -112,7 +112,14 @@ export interface SetFailureToleranceMsg {
 	 */
 	tolerance: number;
 }
-export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg | SetReplayWindowMsg | SetFailureToleranceMsg;
+/**
+ * Pack consecutive Opus frames into one packet before encryption (opus-pack.ts).
+ * `ms` is the packet duration: 20 (the default) turns packing off; up to 120.
+ * Applies to the audio streams of a sender worker; the app sends it only for
+ * an Opus sender without RED.
+ */
+export interface SetAudioPackingMsg { type: 'set-audio-packing'; ms: number }
+export type InMsg = InitMsg | EpochMsg | RotateMsg | TeardownMsg | SetSifTrailerMsg | SetRatchetWindowMsg | StreamsMsg | SetMetricsEnabledMsg | SetReplayWindowMsg | SetFailureToleranceMsg | SetAudioPackingMsg;
 
 /**
  * Structured telemetry event posted from the worker to the main thread when
@@ -127,7 +134,8 @@ export type MetricsEvent =
 	| { kind: 'replay_drop'; epoch: number; peerIndex: number; ctr: string }
 	| { kind: 'key_invalidated'; epoch: number; peerIndex: number; failures: number }
 	| { kind: 'epoch_advance'; from: number; to: number }
-	| { kind: 'encode_drop'; code: string; epoch?: number; peerIndex?: number };
+	| { kind: 'encode_drop'; code: string; epoch?: number; peerIndex?: number }
+	| { kind: 'audio_pack'; packed: number; single: number; staleDropped: number };
 
 /** Worker → main-thread messages emitted through `WorkerState.emit`. */
 export type OutMsg =
@@ -271,6 +279,12 @@ export interface WorkerState {
 	 * Disabled by default to keep the hot path zero-cost.
 	 */
 	metricsEnabled: boolean;
+	/**
+	 * Opus frame packing target in 48 kHz samples (opus-pack.ts); 960 (20 ms)
+	 * = off, the default. Read by every encode-side audio pipe of this worker
+	 * on each frame, so a `set-audio-packing` message takes effect mid-call.
+	 */
+	audioPackSamples: number;
 	/**
 	 * Injectable monotonic clock (ms). Defaults to `performance.now()` — a true
 	 * monotonic clock, unlike `Date.now()` (which can jump backward on an NTP

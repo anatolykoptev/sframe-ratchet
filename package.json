@@ -41,6 +41,10 @@
       "import": "./dist/worker.js",
       "types": "./dist/worker.d.ts"
     },
+    "./opus-pack": {
+      "import": "./dist/opus-pack.js",
+      "types": "./dist/opus-pack.d.ts"
+    },
     "./kex-simple": {
       "import": "./dist/kex-simple.js",
       "types": "./dist/kex-simple.d.ts"
@@ -89,6 +93,7 @@
     "@stryker-mutator/vitest-runner": "^9.6.1",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.9.0",
+    "opusscript": "^0.1.1",
     "ts-mls": "^2.0.0-rc.16",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
