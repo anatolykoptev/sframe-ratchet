@@ -3,13 +3,13 @@
 ## Running tests
 
 ```bash
-npm install
-npm test          # vitest run — 38 unit tests
+npm ci
+npm test          # vitest run
 npm run typecheck # tsc --noEmit
 npm run build     # tsup → dist/
 ```
 
-Node 20 or later required. No native addons; tests run entirely in Node via WebCrypto polyfill provided by Node itself.
+Node 20 or later required (CI runs 20, 22 and 24 on `ubuntu-24.04-arm`). No native addons; tests run entirely in Node via WebCrypto polyfill provided by Node itself.
 
 ## Code style
 
@@ -42,4 +42,9 @@ There is no formatter config yet — match the style of the file you edit.
 - One logical change per PR.
 - New behaviour needs a test.
 - Crypto-path changes need a rationale comment citing the relevant RFC section or threat model entry in `docs/SECURITY.md`.
-- Run `npm test && npm run typecheck && npm run build` before pushing.
+- Run `npm run typecheck && npm test && npm run build` before pushing; that is exactly what the CI `Node` jobs run. A separate CI job runs Stryker mutation tests (`npm run mutation`), and a nightly job fuzzes header parsing and decryption.
+- A pull request that changes only documents (Markdown, `docs/`, licence, templates) skips the CI jobs.
+
+## Commits and releases
+
+Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, ...). release-please reads them to choose the version and write `CHANGELOG.md`; before 1.0 a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) raises the minor version. Never edit the version, the changelog or `.release-please-manifest.json` by hand.
