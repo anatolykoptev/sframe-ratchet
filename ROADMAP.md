@@ -1,6 +1,6 @@
 # Roadmap
 
-Ideas surfaced from a cross-language survey of SFrame implementations (LiveKit, Jitsi, cisco/sframe, sframe-rs, Medooze, shiguredo/sora-e2ee). Full recon with path:line citations: `~/deploy/krolik-server/reports/sframe-ratchet/code-research/competitor-recon-2026-07-18.md`.
+Ideas surfaced from a cross-language survey of SFrame implementations (LiveKit, Jitsi, cisco/sframe, sframe-rs, Medooze, shiguredo/sora-e2ee). Full recon with path:line citations: `reports/sframe-ratchet/code-research/competitor-recon-2026-07-18.md` in the private reports store.
 
 ## Near-term
 
@@ -38,7 +38,7 @@ On `decrypt_failed` for a known epoch, try ratcheting the key forward up to `rat
 Add `MlsKid` codec alongside the fixed 32-bit KID split (`src/ratchet-ids.ts`), gated behind `kidFormat: 'fixed' | 'mls'` (default `'fixed'`, backward compatible). Layout `[Context ID | Index | Epoch]` with configurable bit widths. Prerequisite for the MLS adapter — an external MLS provider produces §5.2 KIDs which we currently cannot parse. Pattern from `sframe-rs:src/mls/mls_key_id.rs:61`.
 
 ### ~~MLS adapter~~ — DONE
-Ship `sframe-ratchet/mls` as an optional subpath wrapping **ts-mls** (MIT, pure TypeScript, RFC 9420). A factory `createMlsRatchetProvider` bridges ts-mls `ClientState` → `FrameCryptor.setEpoch` — the same seam `RoomRatchet` (ECIES) uses. No new provider interface: `setEpoch` IS the seam. ChainKey derived via `mlsExporter(exporterSecret, 'sframe-ratchet/epoch', groupId||suiteByte, chainKeyBytes)`. `buildPeerIndexMap` reused from `ratchet-ids.ts`. ts-mls as optional peerDependency — default ECIES consumers unaffected. Architecture plan: `~/deploy/krolik-server/plans/sframe-ratchet/2026-07-19-mls-adapter-ts-mls-direct.md`.
+Ship `sframe-ratchet/mls` as an optional subpath wrapping **ts-mls** (MIT, pure TypeScript, RFC 9420). A factory `createMlsRatchetProvider` bridges ts-mls `ClientState` → `FrameCryptor.setEpoch` — the same seam `RoomRatchet` (ECIES) uses. No new provider interface: `setEpoch` IS the seam. ChainKey derived via `mlsExporter(exporterSecret, 'sframe-ratchet/epoch', groupId||suiteByte, chainKeyBytes)`. `buildPeerIndexMap` reused from `ratchet-ids.ts`. ts-mls as optional peerDependency — default ECIES consumers unaffected. Architecture plan: `plans/sframe-ratchet/2026-07-19-mls-adapter-ts-mls-direct.md` in the private plans store.
 
 ### ~~Decryption-failure-driven key invalidation~~ — DONE — #14
 After N consecutive `AEADAuthError`s for the same `(epoch, peerIndex)`, mark the key invalid and drop subsequent frames without attempting AEAD. Configurable `failureTolerance` (default `-1` = unlimited, preserves current behavior). New `key_invalidated` metric event. Pattern from `livekit/client-sdk-js:ParticipantKeyHandler.ts:58` (`failureTolerance`, `decryptionFailureCounts`).
