@@ -343,7 +343,7 @@ Event kinds: `encrypt`, `decrypt`, `decrypt_fail` (carries error `code`), `ratch
 
 ## Status
 
-[0.1.0](./CHANGELOG.md) — extracted from a production product and pared down to the parts that are independently useful. Test suite is 38/38 green. API may change before 1.0.
+Pre-1.0, published to npm and released with release-please; see [CHANGELOG.md](./CHANGELOG.md) for the current version. It was extracted from a production product and pared down to the parts that are independently useful. The suite runs in CI on Node 20, 22 and 24, plus nightly fuzzing and a Stryker mutation job. The API may change before 1.0.
 
 ## Compliance
 
