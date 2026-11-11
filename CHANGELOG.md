@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.8...v0.5.9) (2026-11-11)
+
+
+### Documentation
+
+* bring repository documents up to the repo-standards set ([#73](https://github.com/anatolykoptev/sframe-ratchet/issues/73)) ([75aa7c1](https://github.com/anatolykoptev/sframe-ratchet/commit/75aa7c1861aa1e73f4bd668e57278f92cea393b2))
+
 ## [0.5.8](https://github.com/anatolykoptev/sframe-ratchet/compare/v0.5.7...v0.5.8) (2026-08-14)
 
 

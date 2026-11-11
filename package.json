@@ -1,6 +1,6 @@
 {
   "name": "sframe-ratchet",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "type": "module",
   "description": "RFC 9605 SFrame AEAD with epoch ratchet for browser group E2EE",
   "keywords": [
