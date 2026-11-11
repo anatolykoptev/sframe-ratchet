@@ -158,7 +158,7 @@ The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-G
 
 ## File-by-file map
 
-`src/` contains 10 files plus tests and an `internal/` directory:
+`src/` holds the files below plus `__tests__/`, `internal/`, `chat/` (chat-mode provider, `sframe-ratchet/chat`) and `mls/` (MLS adapter, `sframe-ratchet/mls`); the published sub-paths are listed in the `exports` map of `package.json`:
 
 | File | Role |
 |------|------|
@@ -176,6 +176,13 @@ The on-wire `EpochAnnouncement` carries the new chain key wrapped under an AES-G
 | `worker-types.ts` | Worker `postMessage` contract: `InMsg`, `OutMsg`, `PerSenderKeyBundle`, `Side`, `Codec`, `FrameKind`. |
 | `codec-partial.ts` | `getUnencryptedBytes(codec, frameKind) → number`: codec-to-prefix-byte-count table for partial encryption. |
 | `sif-trailer.ts` | `DEFAULT_SIF_TRAILER` constant and `getDefaultSifTrailer()` accessor for the SIF trailer feature. |
+| `kid-format.ts` | RFC 9605 §5.2 MLS Key ID layout and the KID codec abstraction. |
+| `sas.ts` | Short authentication string (emoji and decimal) derived from the X25519 shared secret, for out-of-band MITM detection. |
+| `strict-fips.ts` | `enableStrictFips` / `disableStrictFips`: process-wide guard that rejects suite 4 and `SimpleKex`. |
+| `kex-simple.ts` | `SimpleKex`, a password-based demo key exchange, not for production (sub-path `sframe-ratchet/kex-simple`). |
+| `metrics.ts` | Fire-and-forget metrics posting from the worker to the main thread (`onMetrics`). |
+| `chat/` | Chat-mode provider: HKDF key derivation with an LRU cache, CTR allocation, durable replay protection, and an MLS-backed variant. |
+| `mls/` | Adapter that turns a ts-mls (RFC 9420) epoch into `FrameCryptor.setEpoch` input. |
 | `internal/buffer.ts` | `toArrayBuffer` helper to keep WebCrypto happy across SAB-backed and plain `Uint8Array` inputs. |
 | `errors.ts` | Typed error class hierarchy — all domain errors extend `SFrameError`. |
 
