@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/sframe-ratchet)](https://www.npmjs.com/package/sframe-ratchet)
 [![CI](https://github.com/anatolykoptev/sframe-ratchet/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolykoptev/sframe-ratchet/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
 RFC 9605 SFrame AEAD with an epoch ratchet and Web Worker pipeline, for group end-to-end encryption in browser WebRTC.
 
@@ -351,7 +351,7 @@ Pre-1.0, published to npm and released with release-please; see [CHANGELOG.md](.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+Dual-licensed under [MIT](./LICENSE-MIT) OR [Apache-2.0](./LICENSE-APACHE), at your option.
 
 ---
 

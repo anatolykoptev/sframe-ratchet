@@ -13,4 +13,5 @@
 | [CHANGELOG](../CHANGELOG.md) | Release history, written by release-please |
 | [SECURITY policy](../SECURITY.md) | How to report a vulnerability privately |
 | [CODE_OF_CONDUCT](../CODE_OF_CONDUCT.md) | Contributor Covenant 3.0 Code of Conduct |
-| [LICENSE](../LICENSE) | MIT licence text |
+| [LICENSE-MIT](../LICENSE-MIT) | MIT licence text (one of the two licences, at your option). |
+| [LICENSE-APACHE](../LICENSE-APACHE) | Apache License 2.0 text (the other licence, at your option). |
