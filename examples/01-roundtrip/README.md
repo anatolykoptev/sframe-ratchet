@@ -4,7 +4,7 @@ Minimal Node.js demo: create two SFrame contexts (sender and receiver) using
 `SimpleKex` with a shared password, encrypt a plaintext frame, then decrypt it
 and assert the round-trip is lossless.
 
-No browser required. Runs in Node 20+ using the built-in WebCrypto API.
+No browser required. Runs in Node 22+ using the built-in WebCrypto API.
 
 ## How to run
 

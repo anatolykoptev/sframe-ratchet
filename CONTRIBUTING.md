@@ -9,7 +9,7 @@ npm run typecheck # tsc --noEmit
 npm run build     # tsup → dist/
 ```
 
-Node 20 or later required (CI runs 20, 22 and 24 on `ubuntu-24.04-arm`). No native addons; tests run entirely in Node via WebCrypto polyfill provided by Node itself.
+Node 22 or later required (CI runs 22, 24 and 26.13.1 on `ubuntu-24.04-arm`). No native addons; tests run entirely in Node via WebCrypto polyfill provided by Node itself.
 
 ## Code style
 

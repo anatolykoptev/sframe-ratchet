@@ -32,7 +32,7 @@ Existing implementations cover parts of the problem but not the whole:
 - Web Worker pipeline that isolates `CryptoKey` material from the main thread (via `RTCRtpScriptTransform` when available, `createEncodedStreams` as fallback)
 - X25519 key agreement via WebCrypto with a `@noble/curves` fallback for runtimes that lack it
 - Zero transport dependencies — bring your own key exchange and signaling
-- Browser-first; Node 20+ supported for tests
+- Browser-first; Node 22+ supported for tests
 
 ### FIPS / HIPAA
 
@@ -343,7 +343,7 @@ Event kinds: `encrypt`, `decrypt`, `decrypt_fail` (carries error `code`), `ratch
 
 ## Status
 
-Pre-1.0, published to npm and released with release-please; see [CHANGELOG.md](./CHANGELOG.md) for the current version. It was extracted from a production product and pared down to the parts that are independently useful. The suite runs in CI on Node 20, 22 and 24, plus nightly fuzzing and a Stryker mutation job. The API may change before 1.0.
+Pre-1.0, published to npm and released with release-please; see [CHANGELOG.md](./CHANGELOG.md) for the current version. It was extracted from a production product and pared down to the parts that are independently useful. The suite runs in CI on Node 22, 24 and 26.13.1, plus nightly fuzzing and a Stryker mutation job. The API may change before 1.0.
 
 ## Compliance
 
