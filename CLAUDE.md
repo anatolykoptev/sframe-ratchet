@@ -19,7 +19,7 @@ document is indexed in [docs/INDEX.md](docs/INDEX.md).
 
 ## Gate
 
-CI (`.github/workflows/ci.yml`) runs, on Node 20, 22 and 24:
+CI (`.github/workflows/ci.yml`) runs, on Node 22, 24 and 26.13.1:
 
 ```sh
 npm ci
@@ -28,7 +28,7 @@ npm test
 npm run build
 ```
 
-plus a separate job `npm run mutation` (Stryker, Node 22). `fuzz-nightly.yml` runs the two fuzz
+plus a separate job `npm run mutation` (Stryker, Node 26.13.1). `fuzz-nightly.yml` runs the two fuzz
 tests every night. A docs-only PR (Markdown, `docs/`, licence, issue and PR templates) skips the
 CI jobs through the `docs-scope` job in `ci.yml`; that block is canonical across the fleet and
 compared byte for byte, so do not edit it here.

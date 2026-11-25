@@ -77,7 +77,7 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 26.13.1
           # Intentionally NO registry-url: it would write an .npmrc auth line and
           # set NODE_AUTH_TOKEN, shadowing OIDC. Trusted publishing auto-detects.
       - name: Upgrade npm to a version with OIDC trusted publishing (>= 11.5.1)

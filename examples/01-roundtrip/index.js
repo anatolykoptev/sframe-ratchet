@@ -1,7 +1,7 @@
 /**
  * 01-roundtrip — minimal Node.js SFrame encrypt/decrypt demo.
  *
- * Runs in Node 20+ with no browser required. Uses SimpleKex (shared password)
+ * Runs in Node 22+ with no browser required. Uses SimpleKex (shared password)
  * to derive a chain key, encrypts one frame as the sender, and decrypts it as
  * the receiver. Asserts the round-trip is lossless and prints hex + plaintext.
  *
